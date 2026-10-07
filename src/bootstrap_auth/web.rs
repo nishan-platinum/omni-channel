@@ -51,6 +51,7 @@ async fn home(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match cookie_value(&headers, SESSION_COOKIE) {
         Some(t) => match state.auth.authenticate(&t, SessionKind::Browser).await {
             Ok(p) if p.role == Role::SuperAdmin => Redirect::to("/admin").into_response(),
+            Ok(p) if p.role == Role::Agent => Redirect::to("/agent").into_response(),
             Ok(_) => Redirect::to("/tenant").into_response(),
             Err(_) => Redirect::to("/login").into_response(),
         },
@@ -126,7 +127,11 @@ async fn login_submit(State(state): State<AppState>, headers: HeaderMap, req_par
     let code = Some(f.tenant_code.as_str()).filter(|c| !c.trim().is_empty());
     match state.auth.login(&f.email, &f.password, code, SessionKind::Browser, &meta).await {
         Ok((token, p)) => {
-            let to = if p.role == Role::SuperAdmin { "/admin" } else { "/tenant" };
+            let to = match p.role {
+                Role::SuperAdmin => "/admin",
+                Role::Agent => "/agent",
+                Role::TenantAdmin => "/tenant",
+            };
             let mut r = Redirect::to(to).into_response();
             let max_age = state.config.session_absolute_hours * 3600;
             r.headers_mut().append(header::SET_COOKIE, set_cookie(SESSION_COOKIE, &token, max_age, state.config.cookie_secure));

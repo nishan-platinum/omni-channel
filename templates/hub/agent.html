@@ -1,0 +1,44 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<div class="hub-desk" id="desk" data-agent="{{ agent.user_id }}">
+  <section class="card hub-status">
+    <div>
+      <h1 class="h2">Agent desktop</h1>
+      <p class="help">Skills: {% for s in agent.skills %}<span class="tag">{{ s }}</span> {% endfor %} · capacity {{ agent.max_concurrent }} concurrent · page served by node <code>{{ node }}</code></p>
+    </div>
+    <div class="inline-form">
+      <label for="presence">My status</label>
+      <select id="presence" disabled>
+        <option value="available">Available</option>
+        <option value="busy">Busy</option>
+        <option value="away">Away</option>
+        <option value="wrap_up">Wrap-up</option>
+        <option value="offline">Offline</option>
+      </select>
+      <span id="conn" class="badge badge-muted" role="status" aria-live="polite">connecting…</span>
+    </div>
+  </section>
+  <noscript><p class="banner banner-warn">The agent desktop needs JavaScript for the live connection.</p></noscript>
+  <div class="hub-grid">
+    <section class="card hub-list">
+      <h2 class="h3">My conversations</h2>
+      <ul id="conversations" class="hub-convs" aria-live="polite"></ul>
+      <p id="no-convs" class="empty">No conversations assigned. Set yourself <strong>Available</strong> to receive work.</p>
+    </section>
+    <section class="card hub-thread" aria-labelledby="thread-title">
+      <div class="hub-thread-head">
+        <h2 class="h3" id="thread-title">Select a conversation</h2>
+        <button id="close-conv" class="btn btn-small" type="button" hidden>Close conversation</button>
+      </div>
+      <ol id="messages" class="hub-messages" aria-live="polite"></ol>
+      <form id="reply" class="hub-reply" hidden>
+        <label for="reply-text" class="sr-only">Reply</label>
+        <textarea id="reply-text" rows="2" maxlength="4096" placeholder="Type a reply… (include [fail] to simulate a WhatsApp delivery failure)" required></textarea>
+        <button class="btn btn-primary" type="submit">Send</button>
+      </form>
+      <p id="reply-error" class="field-error" role="alert"></p>
+    </section>
+  </div>
+</div>
+<script src="/static/js/hub-agent.js" defer></script>
+{% endblock %}

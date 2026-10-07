@@ -3,6 +3,8 @@
 //! unique codes, so tests run in parallel without resetting the databases.
 #![allow(dead_code)]
 
+pub mod hub;
+
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -66,6 +68,7 @@ impl TestApp {
         cfg.retention_hours = 1;
         cfg.auto_purge = true;
         cfg.data_dir = std::env::temp_dir().join("omni-m01-tests");
+        cfg.hub_demo_seed = false;
         if std::path::Path::new("config/tenant-db-targets.local.toml").exists() && std::env::var("TENANT_DB_TARGETS_FILE").is_err() {
             cfg.tenant_db_targets_file = "config/tenant-db-targets.local.toml".into();
         }

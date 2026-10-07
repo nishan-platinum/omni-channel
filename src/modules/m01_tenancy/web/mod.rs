@@ -46,6 +46,7 @@ pub fn actor(p: &Principal, ctx: &RequestContext) -> Actor {
         role: match p.role {
             Role::SuperAdmin => ActorRole::SuperAdmin,
             Role::TenantAdmin => ActorRole::TenantAdmin,
+            Role::Agent => ActorRole::Agent,
         },
         tenant_id: p.tenant_id.map(TenantId),
         email: Some(p.email.clone()),
@@ -107,7 +108,7 @@ async fn logo(State(state): State<AppState>, Path(id): Path<String>) -> Response
 async fn theme_css(WebUser(p, _): WebUser) -> Response {
     let primary = p.primary_color.as_deref().filter(|c| c.len() == 7 && c.starts_with('#')).unwrap_or("#0B2130");
     let secondary = p.secondary_color.as_deref().filter(|c| c.len() == 7 && c.starts_with('#')).unwrap_or("#F26A21");
-    let css = if p.role == Role::TenantAdmin {
+    let css = if p.role != Role::SuperAdmin {
         format!(":root {{ --brand-primary: {primary}; --brand-secondary: {secondary}; }}\n")
     } else {
         String::new()

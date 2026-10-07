@@ -24,6 +24,14 @@ use crate::modules::m01_tenancy::infrastructure::adapters::*;
 use crate::modules::m01_tenancy::infrastructure::gate::M01TenantGate;
 use crate::modules::m01_tenancy::infrastructure::persistence::PgStore;
 use crate::modules::m01_tenancy::infrastructure::tenant_data::{targets::load_targets, DataPlaneRouter};
+use crate::modules::m10_hub::application::ports::{ChannelAdapter, RealtimeBus};
+use crate::modules::m10_hub::application::sessions::SessionRegistry;
+use crate::modules::m10_hub::application::HubService;
+use crate::modules::m10_hub::infrastructure::bus::{LocalBus, RedisBus};
+use crate::modules::m10_hub::infrastructure::channels::sip_sim::SimSipAdapter;
+use crate::modules::m10_hub::infrastructure::channels::webchat::WebChatAdapter;
+use crate::modules::m10_hub::infrastructure::channels::whatsapp_sim::{SimCallback, SimWhatsAppAdapter};
+use crate::modules::m10_hub::infrastructure::persistence::PgHubRepository;
 use crate::platform::config::AppConfig;
 use crate::platform::db::{self, Db};
 use crate::platform::events::{EventHandler, OutboxDispatcher};
@@ -39,6 +47,27 @@ pub struct AppInner {
     pub metrics: Arc<TenantMetrics>,
     pub clock: Arc<dyn Clock>,
     pub dispatcher: Arc<OutboxDispatcher>,
+    /// M10 hub (gateway slice) and this node's live WebSocket sessions.
+    pub hub: Arc<HubService>,
+    pub sessions: Arc<SessionRegistry>,
+    /// Receipts emitted by the SIMULATED WhatsApp BSP, processed via the webhook ingest path.
+    pub sim_callbacks: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<SimCallback>>,
+}
+
+impl AppInner {
+    /// Processes pending simulated-provider callbacks (receipts). The background worker does this
+    /// continuously; tests without background workers call it directly.
+    pub async fn drain_sim_callbacks(&self) -> usize {
+        let mut rx = self.sim_callbacks.lock().await;
+        let mut n = 0;
+        while let Ok(cb) = rx.try_recv() {
+            n += 1;
+            if let Err(e) = self.hub.ingest_raw(cb.channel, Some(&cb.signature), &cb.body).await {
+                e.log();
+            }
+        }
+        n
+    }
 }
 
 #[derive(Clone)]
@@ -119,7 +148,61 @@ pub async fn build_state(config: AppConfig, clock: Arc<dyn Clock>) -> anyhow::Re
     let m01 = Arc::new(M01Services::new(deps.clone(), metrics.clone(), db.app.clone()));
     let handlers: Vec<Arc<dyn EventHandler>> = vec![Arc::new(NotificationConsumer { deps }), Arc::new(DownstreamCreatedConsumer)];
     let dispatcher = Arc::new(OutboxDispatcher::new(db.app.clone(), handlers));
-    Ok(AppState(Arc::new(AppInner { config, db, auth, m01, metrics, clock, dispatcher })))
+
+    // ---- M10 hub (ADR-0011/0012) ----
+    let bus: Arc<dyn RealtimeBus> = match &config.redis_url {
+        Some(url) => {
+            let b = RedisBus::new(url)?;
+            if let Err(e) = b.ping().await {
+                anyhow::bail!("REDIS_URL is set but Redis is unreachable: {e}");
+            }
+            Arc::new(b)
+        }
+        None => {
+            tracing::warn!("REDIS_URL not set: hub uses the in-process bus (single node only)");
+            Arc::new(LocalBus::default())
+        }
+    };
+    let sessions = Arc::new(SessionRegistry::new());
+    bus.start(sessions.clone());
+    let (sim_tx, sim_rx) = tokio::sync::mpsc::unbounded_channel();
+    let adapters: Vec<Arc<dyn ChannelAdapter>> = vec![
+        Arc::new(SimWhatsAppAdapter::new(&config.hub_sim_whatsapp_app_secret, sim_tx)),
+        Arc::new(SimSipAdapter::new(&config.hub_sim_sip_secret)),
+        Arc::new(WebChatAdapter),
+    ];
+    let hub = Arc::new(HubService::new(
+        Arc::new(PgHubRepository::new(db.app.clone())),
+        bus,
+        Arc::new(M01TenantGate { pool: db.app.clone(), default_idle_minutes: config.default_session_idle_minutes }),
+        adapters,
+        config.node_id.clone(),
+    ));
+    hub.connect_adapters().await.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    tracing::info!(node = %config.node_id, bus = hub.bus.name(), "M10 hub ready");
+
+    let state = AppState(Arc::new(AppInner {
+        config,
+        db,
+        auth,
+        m01,
+        metrics,
+        clock,
+        dispatcher,
+        hub,
+        sessions,
+        sim_callbacks: tokio::sync::Mutex::new(sim_rx),
+    }));
+    if state.config.hub_demo_seed {
+        // Several nodes may start together against an empty database: retry once after a
+        // concurrent seeder won the race.
+        if let Err(e) = crate::demo_seed::seed(&state).await {
+            tracing::warn!(error = %e, "hub demo seed failed; retrying once");
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            crate::demo_seed::seed(&state).await?;
+        }
+    }
+    Ok(state)
 }
 
 /// Background workers: outbox dispatch, lifecycle scheduler, release rollouts, API meter flush.
@@ -133,6 +216,7 @@ pub fn spawn_background(state: &AppState) {
             s.m01.quotas.flush_api_calls().await;
         }
     });
+    spawn_hub_workers(state);
     if state.config.scheduler_enabled {
         let s = state.clone();
         let every = Duration::from_secs(state.config.scheduler_interval_secs.max(5));
@@ -153,6 +237,51 @@ pub fn spawn_background(state: &AppState) {
     }
 }
 
+/// Hub workers (every node runs them; row locks make them safe to run concurrently):
+/// outbound delivery, routing safety net, presence reaper, simulated-provider receipts.
+fn spawn_hub_workers(state: &AppState) {
+    let s = state.clone();
+    tokio::spawn(async move {
+        let mut t = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            t.tick().await;
+            if let Err(e) = s.hub.delivery_tick().await {
+                e.log();
+            }
+        }
+    });
+    let s = state.clone();
+    tokio::spawn(async move {
+        let mut t = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            t.tick().await;
+            if let Err(e) = s.hub.routing_tick().await {
+                e.log();
+            }
+        }
+    });
+    let s = state.clone();
+    tokio::spawn(async move {
+        let mut t = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            t.tick().await;
+            if let Err(e) = s.hub.reaper_tick().await {
+                e.log();
+            }
+        }
+    });
+    let s = state.clone();
+    tokio::spawn(async move {
+        loop {
+            let next = { s.sim_callbacks.lock().await.recv().await };
+            let Some(cb) = next else { return };
+            if let Err(e) = s.hub.ingest_raw(cb.channel, Some(&cb.signature), &cb.body).await {
+                e.log();
+            }
+        }
+    });
+}
+
 async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok" }))
 }
@@ -160,8 +289,14 @@ async fn health() -> impl IntoResponse {
 /// Readiness: the central DB must be reachable. Tenant DBs are reported separately (never fail
 /// readiness because one tenant database is down).
 async fn ready(State(state): State<AppState>) -> impl IntoResponse {
+    let bus_ok = state.hub.bus.healthy().await;
+    let (agents, customers) = state.sessions.counts();
+    let hub = json!({ "node": state.hub.node_id, "bus": state.hub.bus.name(), "bus_ok": bus_ok, "agent_sockets": agents, "customer_sockets": customers });
+    if !bus_ok {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "status": "not_ready", "hub": hub })));
+    }
     match db::ping(&state.db.app).await {
-        Ok(()) => (StatusCode::OK, Json(json!({ "status": "ready", "central_db": "ok" }))),
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "ready", "central_db": "ok", "hub": hub }))),
         Err(e) => {
             tracing::warn!(error = %e, "readiness check failed");
             (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "status": "not_ready", "central_db": "unreachable" })))
@@ -177,6 +312,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ready", get(ready))
         .merge(crate::bootstrap_auth::web::routes())
         .merge(crate::modules::m01_tenancy::web::routes())
+        .merge(crate::modules::m10_hub::web::routes())
         .nest_service("/static", ServeDir::new("static"))
         .fallback(crate::modules::m01_tenancy::web::html::not_found)
         .layer(from_fn_with_state(state.clone(), crate::modules::m01_tenancy::web::host_guard))

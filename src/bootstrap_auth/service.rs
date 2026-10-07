@@ -24,6 +24,8 @@ pub const INVITATION_HOURS: i64 = 72;
 pub enum Role {
     SuperAdmin,
     TenantAdmin,
+    /// Contact-centre agent of one tenant (M10 hub). Has no M01 administration scopes.
+    Agent,
 }
 
 impl Role {
@@ -31,6 +33,7 @@ impl Role {
         match s {
             "super_admin" => Some(Self::SuperAdmin),
             "tenant_admin" => Some(Self::TenantAdmin),
+            "agent" => Some(Self::Agent),
             _ => None,
         }
     }
@@ -38,19 +41,22 @@ impl Role {
         match self {
             Self::SuperAdmin => "super_admin",
             Self::TenantAdmin => "tenant_admin",
+            Self::Agent => "agent",
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             Self::SuperAdmin => "Platform Super Admin",
             Self::TenantAdmin => "Tenant Admin",
+            Self::Agent => "Agent",
         }
     }
     /// Bootstrap scopes (stand-in for OAuth scopes `<module>.<action>`, API-002).
     pub fn scopes(self) -> Vec<String> {
         match self {
             Self::SuperAdmin => vec!["tenants:read".into(), "tenants:write".into(), "platform:elevated".into()],
-            Self::TenantAdmin => vec!["tenants:read".into(), "tenants:write".into()],
+            Self::TenantAdmin => vec!["tenants:read".into(), "tenants:write".into(), "hub:admin".into()],
+            Self::Agent => vec!["hub:agent".into()],
         }
     }
 }
@@ -577,6 +583,60 @@ impl AuthService {
             .map(|r| Ok((r.try_get("id")?, r.try_get("email")?, r.try_get("display_name")?, r.try_get("status")?)))
             .collect::<Result<Vec<_>, sqlx::Error>>()
             .map_err(AppError::from)
+    }
+
+    /// Creates an active agent user for a tenant (M10 hub; the Tenant Admin sets the initial
+    /// password). Returns the user id.
+    pub async fn create_agent_user(&self, tenant: Uuid, email: &str, display_name: &str, password: &str) -> AppResult<Uuid> {
+        let email = email.trim();
+        if email.is_empty() || email.len() > 320 || !email.contains('@') {
+            return Err(AppError::validation("email", "A valid email address is required"));
+        }
+        let name = display_name.trim();
+        if name.is_empty() || name.chars().count() > 200 {
+            return Err(AppError::validation("display_name", "Display name is required (max 200 characters)"));
+        }
+        let info = self.check_tenant(tenant).await?;
+        if password.chars().count() < info.password_min_length.max(12) || password.len() > 1024 {
+            return Err(AppError::validation(
+                "password",
+                format!("Password must have at least {} characters", info.password_min_length.max(12)),
+            ));
+        }
+        let hash = hash_password_async(password).await?;
+        let id = Uuid::now_v7();
+        let mut tx = scoped_tx(&self.pool, &AccessScope::Tenant(tenant)).await?;
+        sqlx::query(
+            "INSERT INTO identity.users (id, tenant_id, email, display_name, role, status, password_hash)
+             VALUES ($1, $2, $3::citext, $4, 'agent', 'active', $5)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(email)
+        .bind(name)
+        .bind(hash)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(d) if d.is_unique_violation() => {
+                AppError::conflict("A user with this email already exists in this tenant")
+            }
+            e => e.into(),
+        })?;
+        tx.commit().await?;
+        Ok(id)
+    }
+
+    /// Finds a tenant user id by email (used by the development demo seed).
+    pub async fn tenant_user_id(&self, tenant: Uuid, email: &str) -> AppResult<Option<Uuid>> {
+        let mut tx = scoped_tx(&self.pool, &AccessScope::Tenant(tenant)).await?;
+        let id = sqlx::query_scalar("SELECT id FROM identity.users WHERE tenant_id = $1 AND email = $2::citext")
+            .bind(tenant)
+            .bind(email)
+            .fetch_optional(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(id)
     }
 
     pub async fn purge_tenant(&self, tenant: Uuid) -> AppResult<u64> {

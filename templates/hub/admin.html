@@ -1,0 +1,94 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<h1>Contact centre hub</h1>
+<p class="help">M10 gateway slice: channels → canonical messages → durable ordered store → skill routing → live agent and customer sessions. This page was served by node <code>{{ node }}</code> (real-time bus: <code>{{ bus }}</code>; live sockets on this node: {{ agent_sockets }} agent / {{ customer_sockets }} customer).</p>
+
+<div class="grid2">
+  <section class="card">
+    <h2>Queues by skill</h2>
+    {% if queues.is_empty() %}<p class="empty">No conversations waiting.</p>{% else %}
+    <table class="compact"><thead><tr><th>Skill</th><th>Waiting</th><th>Oldest wait</th></tr></thead><tbody>
+    {% for q in queues %}<tr><td><span class="tag">{{ q.skill }}</span></td><td>{{ q.queued }}</td><td>{{ q.oldest_wait_secs }} s</td></tr>{% endfor %}
+    </tbody></table>{% endif %}
+    <h3>Channel health</h3>
+    <table class="compact"><tbody>
+    {% for h in health %}<tr><td>{{ h.channel.as_str() }}</td><td><span class="badge {% if h.healthy %}badge-ok{% else %}badge-bad{% endif %}">{% if h.healthy %}up{% else %}down{% endif %}</span> {% if h.simulated %}<span class="tag">simulated</span>{% endif %}</td><td class="small">{{ h.detail }}</td></tr>{% endfor %}
+    </tbody></table>
+  </section>
+
+  <section class="card">
+    <h2>Channels</h2>
+    {% if endpoints.is_empty() %}<p class="empty">No channels yet. Create the simulated set below.</p>{% else %}
+    <table class="compact"><thead><tr><th>Channel</th><th>Address</th><th>Routes to skill</th></tr></thead><tbody>
+    {% for e in endpoints %}
+      <tr><td>{{ e.channel.as_str() }} {% if e.simulated %}<span class="tag">simulated</span>{% endif %}</td>
+        <td>{% if e.channel.as_str() == "webchat" %}<a href="/chat/{{ e.address }}" target="_blank" rel="noopener">Open customer chat ↗</a>{% else %}<code class="small">{{ e.address }}</code><br><span class="small">{{ e.label }}</span>{% endif %}</td>
+        <td><span class="tag">{{ e.default_skill }}</span></td></tr>
+    {% endfor %}
+    </tbody></table>{% endif %}
+    <details class="editor" {% if endpoints.is_empty() %}open{% endif %}>
+      <summary>Create simulated channels</summary>
+      <form method="post" action="/hub/admin/channels" class="form">
+        <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+        <p class="help">Creates a fake WhatsApp number, a fake voice DID and a web-chat widget. No credentials are needed; nothing leaves this server.</p>
+        <div class="two-col">
+          <div><label for="ws">WhatsApp → skill</label><input id="ws" name="whatsapp_skill" value="support"></div>
+          <div><label for="vs">Voice → skill</label><input id="vs" name="voice_skill" value="support"></div>
+          <div><label for="cs">Web chat → skill</label><input id="cs" name="webchat_skill" value="sales"></div>
+        </div>
+        <button class="btn btn-primary" type="submit">Create channels</button>
+      </form>
+    </details>
+  </section>
+</div>
+
+<section class="card">
+  <h2>Agents</h2>
+  {% if agents.is_empty() %}<p class="empty">No agents yet.</p>{% else %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Agent</th><th>Skills</th><th>Status</th><th>Load</th><th>Last heartbeat</th></tr></thead>
+    <tbody>
+    {% for a in agents %}
+      <tr><td>{{ a.display_name }}<br><span class="small">{{ a.email }}</span></td>
+        <td>{% for s in a.skills %}<span class="tag">{{ s }}</span> {% endfor %}</td>
+        <td><span class="badge {{ self.badge(a.presence.as_str()) }}">{{ a.presence.as_str() }}</span></td>
+        <td>{{ a.active }} / {{ a.max_concurrent }}</td>
+        <td class="small">{% if let Some(h) = a.heartbeat_at %}{{ h.format("%Y-%m-%d %H:%M:%S") }} UTC{% if let Some(n) = a.node_id.as_ref() %} · {{ n }}{% endif %}{% else %}never{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>{% endif %}
+  <details class="editor" {% if agents.is_empty() %}open{% endif %}>
+    <summary>Add an agent</summary>
+    <form method="post" action="/hub/admin/agents" class="form grid-form">
+      <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+      <div class="two-col">
+        <div><label for="a-email">Email</label><input id="a-email" name="email" type="email" required></div>
+        <div><label for="a-name">Display name</label><input id="a-name" name="display_name" required></div>
+        <div><label for="a-pass">Initial password (min 12)</label><input id="a-pass" name="password" type="password" minlength="12" autocomplete="new-password" required></div>
+        <div><label for="a-skills">Skills (comma separated)</label><input id="a-skills" name="skills" value="support" required></div>
+        <div><label for="a-cap">Max concurrent conversations</label><input id="a-cap" name="max_concurrent" value="3" inputmode="numeric" class="num"></div>
+      </div>
+      <button class="btn btn-primary" type="submit">Create agent</button>
+    </form>
+  </details>
+</section>
+
+<section class="card">
+  <h2>Recent conversations</h2>
+  {% if conversations.is_empty() %}<p class="empty">No conversations yet — send one from the <a href="/hub/simulator">simulator</a>.</p>{% else %}
+  <div class="table-wrap"><table class="compact">
+    <thead><tr><th>Channel</th><th>Customer</th><th>Skill</th><th>Status</th><th>Agent</th><th>Messages</th><th>Updated</th></tr></thead>
+    <tbody>
+    {% for c in conversations %}
+      <tr><td>{{ c.channel.as_str() }}</td>
+        <td>{% if let Some(n) = c.customer_name.as_ref() %}{{ n }}<br>{% endif %}<span class="small">{{ c.customer_address }}</span></td>
+        <td><span class="tag">{{ c.required_skill }}</span></td>
+        <td><span class="badge {{ self.badge(c.status.as_str()) }}">{{ c.status.as_str() }}</span></td>
+        <td>{{ self.agent_name(c.assigned_agent) }}</td>
+        <td>{{ c.last_seq }}</td>
+        <td class="small">{{ c.updated_at.format("%H:%M:%S") }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>{% endif %}
+</section>
+{% endblock %}

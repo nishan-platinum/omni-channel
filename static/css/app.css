@@ -179,3 +179,23 @@ meter { width: 100%; }
 .form .actions .btn { margin-top: 0; }
 table.config th[scope=row] label { margin: 0 0 2px; }
 table.config .help { margin-bottom: 0; }
+
+/* ---- M10 hub: agent desktop, customer chat, simulator ---- */
+.hub-status { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; }
+.hub-status .h2 { margin: 0 0 4px; }
+.hub-grid { display: grid; grid-template-columns: minmax(220px, 1fr) 3fr; gap: 16px; }
+.hub-convs { list-style: none; margin: 0; padding: 0; }
+.hub-conv { display: block; width: 100%; text-align: left; font: inherit; padding: 8px 10px; margin-bottom: 6px; border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer; }
+.hub-conv.active { border-color: var(--brand-secondary); box-shadow: 0 0 0 2px rgba(242,106,33,.15); }
+.hub-thread-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.hub-messages { list-style: none; margin: 0 0 12px; padding: 8px; max-height: 52vh; overflow-y: auto; background: #f6f8f9; border: 1px solid var(--border); border-radius: 6px; min-height: 160px; }
+.hub-msg { max-width: 78%; margin: 6px 0; padding: 7px 10px; border-radius: 8px; background: #fff; border: 1px solid var(--border); }
+.hub-msg.hub-outbound { margin-left: auto; background: #eaf3fb; }
+.hub-msg.hub-event { max-width: 100%; background: transparent; border-style: dashed; font-size: 13px; color: var(--muted); }
+.hub-meta { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+.hub-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.hub-reply { display: flex; gap: 8px; align-items: flex-end; }
+.hub-reply textarea { flex: 1; max-width: none; }
+.hub-chat.narrow { max-width: 640px; }
+pre.code { background: #0b2130; color: #e8eef2; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; white-space: pre; }
+@media (max-width: 760px) { .hub-grid { grid-template-columns: 1fr; } }

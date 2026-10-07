@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "allowScriptTags": false}'>
-  <title>{{ page.title }} · Omni Channel CRM · M01</title>
+  <title>{{ page.title }} · Omni Channel CRM</title>
   <link rel="stylesheet" href="/static/css/app.css">
   {% if page.theme %}<link rel="stylesheet" href="/theme.css">{% endif %}
   <script src="/static/js/htmx.min.js" defer></script>
@@ -16,7 +16,7 @@
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">◆</span>
       <span class="brand-name">TM CPaaS Omni Channel CRM</span>
-      <span class="brand-module">M01 · Tenant Management</span>
+      <span class="brand-module">M01 Tenancy · M10 Hub</span>
     </div>
     {% if let Some(u) = page.user.as_ref() %}
     <nav class="mainnav" aria-label="Main">
@@ -29,8 +29,12 @@
         <a href="/admin/analytics" {% if page.nav == "analytics" %}aria-current="page"{% endif %}>Analytics</a>
         <a href="/admin/dr" {% if page.nav == "dr" %}aria-current="page"{% endif %}>DR</a>
         {% if page.dev_outbox %}<a href="/dev/outbox" class="dev" {% if page.nav == "outbox" %}aria-current="page"{% endif %}>Dev outbox</a>{% endif %}
+      {% else if u.is_agent %}
+        <a href="/agent" {% if page.nav == "agent" %}aria-current="page"{% endif %}>Agent desktop</a>
       {% else %}
         <a href="/tenant" {% if page.nav == "tenants" %}aria-current="page"{% endif %}>My tenant</a>
+        <a href="/hub/admin" {% if page.nav == "hub" %}aria-current="page"{% endif %}>Contact centre</a>
+        <a href="/hub/simulator" class="dev" {% if page.nav == "simulator" %}aria-current="page"{% endif %}>Simulator</a>
         <a href="/tenant/config">Configuration</a>
         <a href="/tenant/quotas">Quotas</a>
         <a href="/tenant/branding">Branding</a>
@@ -56,7 +60,7 @@
     {% block content %}{% endblock %}
   </main>
   <footer class="footer">
-    Rust · Axum · Askama · SQLx — M01 reference implementation. Integrations marked <span class="tag">reference</span> are local stand-ins, not production services.
+    Rust · Axum · Askama · SQLx — M01 + M10 hub reference implementation. Integrations marked <span class="tag">reference</span> or <span class="tag">simulated</span> are local stand-ins, not production services.
   </footer>
 </body>
 </html>

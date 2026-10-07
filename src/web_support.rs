@@ -75,6 +75,7 @@ pub struct NavUser {
     pub email: String,
     pub role_label: &'static str,
     pub is_super_admin: bool,
+    pub is_agent: bool,
     pub tenant_name: Option<String>,
     pub tenant_code: Option<String>,
     pub tenant_status: Option<String>,
@@ -88,6 +89,7 @@ impl NavUser {
             email: p.email.clone(),
             role_label: p.role.label(),
             is_super_admin: p.role == Role::SuperAdmin,
+            is_agent: p.role == Role::Agent,
             tenant_name: p.tenant_name.clone(),
             tenant_code: p.tenant_code.clone(),
             tenant_status: p.tenant_status.clone(),
@@ -121,7 +123,7 @@ impl PageCtx {
             flash,
             nav,
             dev_outbox: dev_outbox && p.role == Role::SuperAdmin,
-            theme: p.role == Role::TenantAdmin,
+            theme: matches!(p.role, Role::TenantAdmin | Role::Agent),
         }
     }
 }

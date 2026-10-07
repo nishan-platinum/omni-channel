@@ -73,6 +73,18 @@ pub struct AppConfig {
     pub log_format: LogFormat,
     pub access_log: bool,
     pub api_token_ttl_minutes: i64,
+    /// M10 hub: Redis for cross-node real-time fan-out (FR-ARC-003). None → single-node local bus.
+    pub redis_url: Option<String>,
+    /// M10 hub: this node's id (presence ownership, logs, /ready).
+    pub node_id: String,
+    /// SIMULATED WhatsApp BSP app secret (X-Hub-Signature-256) and webhook verify token.
+    pub hub_sim_whatsapp_app_secret: String,
+    pub hub_sim_whatsapp_verify_token: String,
+    /// SIMULATED SBC event-feed signing secret.
+    pub hub_sim_sip_secret: String,
+    /// Development only: seed the `demo` tenant, agents and simulated channels at start-up.
+    pub hub_demo_seed: bool,
+    pub hub_demo_password: Option<String>,
 }
 
 impl fmt::Debug for AppConfig {
@@ -95,6 +107,10 @@ impl fmt::Debug for AppConfig {
             .field("auto_purge", &self.auto_purge)
             .field("scheduler_enabled", &self.scheduler_enabled)
             .field("platform_domain", &self.platform_domain)
+            .field("redis_url", &self.redis_url.as_deref().map(redact_url))
+            .field("node_id", &self.node_id)
+            .field("hub_sim_secrets", &"<redacted>")
+            .field("hub_demo_seed", &self.hub_demo_seed)
             .finish_non_exhaustive()
     }
 }
@@ -192,6 +208,15 @@ impl AppConfig {
             log_format,
             access_log: parse_bool("ACCESS_LOG", true)?,
             api_token_ttl_minutes: parse_var("API_TOKEN_TTL_MINUTES", 60i64)?,
+            redis_url: var("REDIS_URL"),
+            node_id: var("NODE_ID")
+                .or_else(|| var("HOSTNAME"))
+                .unwrap_or_else(|| format!("node-{}", &uuid::Uuid::new_v4().simple().to_string()[..8])),
+            hub_sim_whatsapp_app_secret: var_or("HUB_SIM_WHATSAPP_APP_SECRET", "dev-sim-whatsapp-app-secret-change-me"),
+            hub_sim_whatsapp_verify_token: var_or("HUB_SIM_WHATSAPP_VERIFY_TOKEN", "dev-sim-verify-token"),
+            hub_sim_sip_secret: var_or("HUB_SIM_SIP_SECRET", "dev-sim-sip-secret-change-me"),
+            hub_demo_seed: parse_bool("HUB_DEMO_SEED", false)? && app_env.is_development(),
+            hub_demo_password: var("HUB_DEMO_PASSWORD"),
         };
 
         if cfg.grace_period_hours < 0 || cfg.retention_hours < 0 {

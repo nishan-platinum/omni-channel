@@ -1,5 +1,7 @@
-# Local runtime for the M01 Rust prototype:
+# Local runtime for the M01 + M10 hub Rust prototype:
 #   cp .env.example .env && docker compose up --build   →  http://localhost:3000
+# Two hub nodes behind one load balancer (gateway multi-node tests):
+#   docker compose --profile cluster up --build -d       →  http://localhost:8080
 name: omni-m01
 
 services:
@@ -54,15 +56,30 @@ services:
       timeout: 5s
       retries: 40
 
-  app:
+  # Real-time bus of the M10 hub (cross-node fan-out, FR-ARC-003). Holds no durable data.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  app: &app
     build: .
+    image: omni-m01-app:local
     env_file: .env
-    environment:
+    environment: &app-env
       # Container-internal addresses override the localhost values used by `cargo run`.
       APP_BIND_ADDR: 0.0.0.0:3000
       DATABASE_URL: postgres://crm_app:${CRM_APP_PASSWORD}@central-db:5432/omni_control
       MIGRATION_DATABASE_URL: postgres://crm_owner:${POSTGRES_OWNER_PASSWORD}@central-db:5432/omni_control
       TENANT_DB_TARGETS_FILE: /app/config/tenant-db-targets.toml
+      REDIS_URL: redis://redis:6379
+      NODE_ID: app
       DATA_DIR: /app/data
       LOG_FORMAT: json
     volumes:
@@ -76,7 +93,38 @@ services:
         condition: service_healthy
       tenant-mysql:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
+
+  # ---- profile "cluster": two hub nodes + nginx load balancer (WebSocket upgrade) on :8080 ----
+  app1:
+    <<: *app
+    profiles: ["cluster"]
+    environment:
+      <<: *app-env
+      NODE_ID: app1
+      PUBLIC_BASE_URL: http://localhost:8080
+    ports: []
+  app2:
+    <<: *app
+    profiles: ["cluster"]
+    environment:
+      <<: *app-env
+      NODE_ID: app2
+      PUBLIC_BASE_URL: http://localhost:8080
+      HUB_DEMO_SEED: "false"
+    ports: []
+  lb:
+    image: nginx:1.27-alpine
+    profiles: ["cluster"]
+    volumes:
+      - ./docker/lb/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      - app1
+      - app2
 
 volumes:
   central-db-data:
