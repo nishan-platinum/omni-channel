@@ -317,10 +317,14 @@ impl HubRepository for PgHubRepository {
             .await?;
             out.push(ReapedAgent { tenant_id: tenant, agent_id: agent, requeued });
         }
-        // Orphans: assigned conversations whose agent user was deleted.
+        // Orphans: assigned conversations whose agent user was deleted, or whose agent is Offline
+        // (signed off with work still assigned) — back to the queue so customers are not stranded.
         let orphans = sqlx::query(
-            "UPDATE hub.conversations SET status = 'queued', queued_at = now(), updated_at = now()
-              WHERE status = 'assigned' AND assigned_agent IS NULL RETURNING id, tenant_id",
+            "UPDATE hub.conversations c SET status = 'queued', assigned_agent = NULL, queued_at = now(), updated_at = now()
+              WHERE c.status = 'assigned'
+                AND (c.assigned_agent IS NULL
+                     OR EXISTS (SELECT 1 FROM hub.agent_presence p WHERE p.user_id = c.assigned_agent AND p.status = 'offline'))
+              RETURNING c.id, c.tenant_id",
         )
         .fetch_all(&mut *tx)
         .await?;

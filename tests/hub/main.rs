@@ -393,3 +393,22 @@ async fn agent_creation_counts_against_the_m01_user_quota() {
     assert_eq!(q.status, StatusCode::OK, "{}", q.text);
     assert_eq!(q.data()["usage"]["users"], 2, "Tenant Admin + 1 agent are counted: {}", q.text);
 }
+
+#[tokio::test]
+async fn going_offline_hands_open_conversations_to_another_agent() {
+    let h = HubApp::new().await;
+    let t = h.tenant().await;
+    let (_, tok1) = h.agent(&t, &["support"], 3).await;
+    let (_, tok2) = h.agent(&t, &["support"], 3).await;
+    let (mut ws1, _) = h.agent_online(&tok1, true).await;
+    h.whatsapp_inbound(&t.whatsapp, "60100000071", "first", &wamid()).await;
+    let a = recv_type(&mut ws1, "conversation.assigned").await;
+    let (mut ws2, _) = h.agent_online(&tok2, true).await;
+    // Agent 1 signs off: the open conversation moves to agent 2, and so do new messages.
+    send(&mut ws1, json!({ "type": "presence.set", "status": "offline" })).await;
+    let re = recv_type(&mut ws2, "conversation.assigned").await;
+    assert_eq!(conv_id(&re), conv_id(&a));
+    h.whatsapp_inbound(&t.whatsapp, "60100000071", "second", &wamid()).await;
+    let m = recv_type(&mut ws2, "message.new").await;
+    assert_eq!(m["message"]["body"], "second");
+}

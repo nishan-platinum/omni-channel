@@ -254,8 +254,13 @@ impl HubService {
     pub async fn set_presence(&self, a: AgentCtx, p: Presence) -> AppResult<()> {
         self.repo.set_presence(a.tenant_id, a.user_id, p, &self.node_id).await?;
         self.publish(a.tenant_id, Target::Agent { id: a.user_id }, json!({ "type": "presence", "status": p })).await;
-        if p == Presence::Available {
-            self.drain(a).await?;
+        match p {
+            Presence::Available => self.drain(a).await?,
+            // Signing off hands this agent's open conversations back to the queue right away.
+            Presence::Offline => {
+                self.reaper_tick().await?;
+            }
+            _ => {}
         }
         Ok(())
     }
