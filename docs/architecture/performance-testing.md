@@ -114,7 +114,7 @@ Notes:
 
 First results and the changes they forced (4 KiB socket buffers, reader/writer split per socket,
 handshake admission control, single-statement inbound append, optimistic single-agent routing locks):
-[`bench-results/20261007T083045Z-hub/summary.md`](../../bench-results/20261007T083045Z-hub/summary.md).
+[`hub-measurements-2026-10-07.md`](hub-measurements-2026-10-07.md) (raw run directories under `bench-results/` are not committed).
 
 Browser check (manual or automated): sign in as an agent at `/agent`, open `/chat/{widget}` in another
 browser context, exchange messages, observe the `read` receipt, reload both pages. This was automated once

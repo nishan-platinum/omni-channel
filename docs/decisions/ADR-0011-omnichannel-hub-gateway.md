@@ -59,5 +59,5 @@ repository therefore no longer qualifies as a fresh-scaffold bake-off entry; it 
 * M01 is unchanged in behaviour; the hub depends on M01 only through the tenant gate, quotas and auth.
 * Regulated (dedicated database) tenants still keep their hub data in the central cluster in this
   slice; moving hub tables to the tenant's data plane is future work (the repository is behind a port).
-* Simulated channels only (ADR-0012). Measurements: `bench-results/*-hub/`,
-  `docs/architecture/performance-testing.md`.
+* Simulated channels only (ADR-0012). Measurements: `docs/architecture/hub-measurements-2026-10-07.md`,
+  procedure in `docs/architecture/performance-testing.md`.

@@ -204,7 +204,7 @@ cargo build --release --bin hub_load
 
 First results (one laptop, client and server on the same machine): 100 000 idle sessions on one node
 with 0 failures; delivery p50 ≈ 5 ms / p99 ≈ 60–115 ms at ≈ 720 msg/s; 4 561 messages through a node
-kill and a rolling restart with 0 lost — see `bench-results/20261007T083045Z-hub/summary.md`.
+kill and a rolling restart with 0 lost — see [`docs/architecture/hub-measurements-2026-10-07.md`](docs/architecture/hub-measurements-2026-10-07.md).
 
 ## Repository layout
 
