@@ -6,7 +6,7 @@
   var desk = document.getElementById("desk");
   if (!desk) return;
   var $ = function (id) { return document.getElementById(id); };
-  var state = { convs: {}, order: [], active: null, ws: null, retry: 0, pending: {} };
+  var state = { convs: {}, order: [], active: null, ws: null, retry: 0, pending: {}, lastFrame: Date.now() };
 
   function wsUrl() {
     return (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/v1/hub/ws/agent";
@@ -191,6 +191,7 @@
     state.ws = ws;
     ws.onopen = function () {
       state.retry = 0;
+      state.lastFrame = Date.now();
       var resume = {};
       state.order.forEach(function (id) { resume[id] = state.convs[id].lastSeq; });
       ws.send(JSON.stringify({ type: "hello", resume: resume }));
@@ -198,6 +199,7 @@
       Object.keys(state.pending).forEach(function (k) { ws.send(JSON.stringify(state.pending[k])); });
     };
     ws.onmessage = function (e) {
+      state.lastFrame = Date.now();
       try { onFrame(JSON.parse(e.data)); } catch (err) { /* ignore malformed */ }
     };
     ws.onclose = function (e) {
@@ -226,5 +228,10 @@
     if (state.active && window.confirm("Close this conversation?")) send({ type: "conversation.close", conversation_id: state.active });
   });
   setInterval(function () { send({ type: "ping" }); }, 25000);
+  // Watchdog: a half-open connection (e.g. the node behind the load balancer crashed) shows no
+  // frames at all, not even pongs — close it so onclose reconnects and resumes.
+  setInterval(function () {
+    if (state.ws && state.ws.readyState === 1 && Date.now() - state.lastFrame > 60000) state.ws.close();
+  }, 10000);
   connect();
 })();

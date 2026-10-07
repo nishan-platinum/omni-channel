@@ -115,41 +115,49 @@ async fn status_event(
     Ok(())
 }
 
-/// Locks the available agents with `skill` (ordered by id → no deadlocks), then reads their
-/// current load in a fresh statement (so the count reflects commits made while we waited).
+const CANDIDATE_COLS: &str = "a.user_id, a.skills, a.max_concurrent::bigint AS max_concurrent, p.status,
+        (SELECT count(*) FROM hub.conversations c WHERE c.assigned_agent = a.user_id AND c.status = 'assigned') AS active";
+
+fn candidate(r: &PgRow) -> Result<AgentCandidate, sqlx::Error> {
+    Ok(AgentCandidate {
+        user_id: r.try_get("user_id")?,
+        skills: r.try_get("skills")?,
+        presence: parse(r.try_get("status")?)?,
+        active: r.try_get("active")?,
+        max_concurrent: r.try_get("max_concurrent")?,
+    })
+}
+
+/// Available agents with `skill` and their current load (snapshot, no locks).
 async fn candidates(c: &mut PgConnection, tenant: Uuid, skill: &str) -> Result<Vec<AgentCandidate>, sqlx::Error> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT p.user_id FROM hub.agent_presence p JOIN hub.agents a ON a.user_id = p.user_id
-          WHERE a.tenant_id = $1 AND $2 = ANY(a.skills) AND p.status = 'available'
-          ORDER BY p.user_id FOR UPDATE OF p",
-    )
+    let rows = sqlx::query(&format!(
+        "SELECT {CANDIDATE_COLS} FROM hub.agents a JOIN hub.agent_presence p ON p.user_id = a.user_id
+          WHERE a.tenant_id = $1 AND $2 = ANY(a.skills) AND p.status = 'available'"
+    ))
     .bind(tenant)
     .bind(skill)
     .fetch_all(&mut *c)
     .await?;
-    if ids.is_empty() {
-        return Ok(Vec::new());
+    rows.iter().map(candidate).collect()
+}
+
+/// Locks ONE agent's presence row, then re-reads its presence and load in a fresh statement, so
+/// the capacity check sees every assignment committed by whoever held the lock before us.
+async fn lock_candidate(c: &mut PgConnection, agent: Uuid) -> Result<Option<AgentCandidate>, sqlx::Error> {
+    let locked: Option<Uuid> = sqlx::query_scalar("SELECT user_id FROM hub.agent_presence WHERE user_id = $1 FOR UPDATE")
+        .bind(agent)
+        .fetch_optional(&mut *c)
+        .await?;
+    if locked.is_none() {
+        return Ok(None);
     }
-    let rows = sqlx::query(
-        "SELECT a.user_id, a.skills, a.max_concurrent::bigint AS max_concurrent, p.status,
-                (SELECT count(*) FROM hub.conversations c WHERE c.assigned_agent = a.user_id AND c.status = 'assigned') AS active
-           FROM hub.agents a JOIN hub.agent_presence p ON p.user_id = a.user_id
-          WHERE a.user_id = ANY($1)",
-    )
-    .bind(&ids)
-    .fetch_all(&mut *c)
+    let r = sqlx::query(&format!(
+        "SELECT {CANDIDATE_COLS} FROM hub.agents a JOIN hub.agent_presence p ON p.user_id = a.user_id WHERE a.user_id = $1"
+    ))
+    .bind(agent)
+    .fetch_optional(&mut *c)
     .await?;
-    rows.iter()
-        .map(|r| {
-            Ok(AgentCandidate {
-                user_id: r.try_get("user_id")?,
-                skills: r.try_get("skills")?,
-                presence: parse(r.try_get("status")?)?,
-                active: r.try_get("active")?,
-                max_concurrent: r.try_get("max_concurrent")?,
-            })
-        })
-        .collect()
+    r.as_ref().map(candidate).transpose()
 }
 
 async fn assign(c: &mut PgConnection, conversation: Uuid, agent: Uuid) -> Result<(), sqlx::Error> {
@@ -324,25 +332,20 @@ impl HubRepository for PgHubRepository {
     }
 
     async fn append_inbound(&self, ep: &Endpoint, m: &CanonicalMessage) -> AppResult<Appended> {
+        // Hot path, one round trip per step: (1) find-or-open the customer's thread and take the
+        // next sequence number in a single upsert (row stays locked until commit → gap-free,
+        // ordered), (2) insert the message. A duplicate provider delivery hits the idempotency
+        // unique key; the transaction is rolled back (no sequence number is consumed) and the
+        // stored message is returned instead.
         let mut tx = scoped_tx(&self.pool, &AccessScope::Tenant(ep.tenant_id)).await?;
-        // Duplicate provider delivery → return the stored message, change nothing.
-        if let Some(r) = sqlx::query(&format!("SELECT {MSG_COLS} FROM hub.messages WHERE tenant_id = $1 AND idempotency_key = $2"))
-            .bind(ep.tenant_id)
-            .bind(&m.idempotency_key)
-            .fetch_optional(&mut *tx)
-            .await?
-        {
-            let msg = message(&r)?;
-            let conv =
-                load_conversation(&mut tx, msg.conversation_id, false).await?.ok_or_else(|| AppError::not_found("Conversation missing"))?;
-            tx.commit().await?;
-            return Ok(Appended { conversation: conv, message: msg, duplicate: true, created_conversation: false });
-        }
-        let created: Option<Uuid> = sqlx::query_scalar(
-            "INSERT INTO hub.conversations (id, tenant_id, endpoint_id, channel, customer_address, customer_name, status, required_skill, queued_at)
-             VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, now())
-             ON CONFLICT (endpoint_id, customer_address) WHERE status <> 'closed' DO NOTHING RETURNING id",
-        )
+        let r = sqlx::query(&format!(
+            "INSERT INTO hub.conversations (id, tenant_id, endpoint_id, channel, customer_address, customer_name, status, required_skill, queued_at, last_seq)
+             VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, now(), 1)
+             ON CONFLICT (endpoint_id, customer_address) WHERE status <> 'closed'
+             DO UPDATE SET last_seq = hub.conversations.last_seq + 1, updated_at = now(),
+                           customer_name = coalesce(hub.conversations.customer_name, EXCLUDED.customer_name)
+             RETURNING {CONV_COLS}, (xmax = 0) AS inserted"
+        ))
         .bind(Uuid::now_v7())
         .bind(ep.tenant_id)
         .bind(ep.id)
@@ -350,51 +353,48 @@ impl HubRepository for PgHubRepository {
         .bind(&m.customer_address)
         .bind(&m.customer_name)
         .bind(&ep.default_skill)
-        .fetch_optional(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?;
-        let conv_id =
-            match created {
-                Some(id) => id,
-                None => sqlx::query_scalar(
-                    "SELECT id FROM hub.conversations WHERE endpoint_id = $1 AND customer_address = $2 AND status <> 'closed' FOR UPDATE",
-                )
-                .bind(ep.id)
-                .bind(&m.customer_address)
-                .fetch_one(&mut *tx)
-                .await?,
-            };
-        if m.customer_name.is_some() {
-            sqlx::query("UPDATE hub.conversations SET customer_name = coalesce(customer_name, $2) WHERE id = $1")
-                .bind(conv_id)
-                .bind(&m.customer_name)
-                .execute(&mut *tx)
-                .await?;
-        }
-        let seq = next_seq(&mut tx, conv_id).await?;
+        let conv = conversation(&r)?;
+        let created: bool = r.try_get("inserted")?;
         let (direction, sender) = match m.kind {
             MessageKind::Text => (Direction::Inbound, SenderType::Customer),
             MessageKind::CallEvent | MessageKind::System => (Direction::Event, SenderType::System),
         };
-        let r = sqlx::query(&format!(
+        let inserted = sqlx::query(&format!(
             "INSERT INTO hub.messages (id, tenant_id, conversation_id, seq, direction, kind, sender_type, body, provider_message_id, idempotency_key)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING {MSG_COLS}"
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT DO NOTHING RETURNING {MSG_COLS}"
         ))
         .bind(Uuid::now_v7())
         .bind(ep.tenant_id)
-        .bind(conv_id)
-        .bind(seq)
+        .bind(conv.id)
+        .bind(conv.last_seq)
         .bind(direction.as_str())
         .bind(m.kind.as_str())
         .bind(sender.as_str())
         .bind(&m.body)
         .bind(&m.provider_message_id)
         .bind(&m.idempotency_key)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
+        if let Some(r) = inserted {
+            let msg = message(&r)?;
+            tx.commit().await?;
+            return Ok(Appended { conversation: conv, message: msg, duplicate: false, created_conversation: created });
+        }
+        tx.rollback().await?;
+        let mut tx = scoped_tx(&self.pool, &AccessScope::Tenant(ep.tenant_id)).await?;
+        let r = sqlx::query(&format!("SELECT {MSG_COLS} FROM hub.messages WHERE tenant_id = $1 AND idempotency_key = $2"))
+            .bind(ep.tenant_id)
+            .bind(&m.idempotency_key)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| AppError::conflict("Provider message id already used by another message"))?;
         let msg = message(&r)?;
-        let conv = load_conversation(&mut tx, conv_id, false).await?.ok_or_else(|| AppError::not_found("Conversation missing"))?;
+        let conv =
+            load_conversation(&mut tx, msg.conversation_id, false).await?.ok_or_else(|| AppError::not_found("Conversation missing"))?;
         tx.commit().await?;
-        Ok(Appended { conversation: conv, message: msg, duplicate: false, created_conversation: created.is_some() })
+        Ok(Appended { conversation: conv, message: msg, duplicate: true, created_conversation: false })
     }
 
     async fn append_outbound(
@@ -568,14 +568,23 @@ impl HubRepository for PgHubRepository {
         if conv.status != ConversationStatus::Queued {
             return Ok(None);
         }
-        let cands = candidates(&mut tx, tenant, &conv.required_skill).await?;
-        let Some(agent) = pick_agent(&conv.required_skill, &cands) else {
-            tx.commit().await?;
-            return Ok(None);
-        };
-        assign(&mut tx, conversation_id, agent).await?;
+        // Optimistic: choose from an unlocked snapshot, then lock only the chosen agent and
+        // re-check. Concurrent routings to different agents run in parallel; two routings that
+        // chose the same agent serialise on its row and the second re-counts its load.
+        let skill = conv.required_skill.clone();
+        let mut cands = candidates(&mut tx, tenant, &skill).await?;
+        while let Some(agent) = pick_agent(&skill, &cands) {
+            match lock_candidate(&mut tx, agent).await? {
+                Some(fresh) if fresh.can_take(&skill) => {
+                    assign(&mut tx, conversation_id, agent).await?;
+                    tx.commit().await?;
+                    return Ok(Some(Assignment { tenant_id: tenant, conversation_id, agent_id: agent }));
+                }
+                _ => cands.retain(|c| c.user_id != agent),
+            }
+        }
         tx.commit().await?;
-        Ok(Some(Assignment { tenant_id: tenant, conversation_id, agent_id: agent }))
+        Ok(None)
     }
 
     async fn drain_for_agent(&self, tenant: Uuid, agent: Uuid) -> AppResult<Vec<Assignment>> {
@@ -883,6 +892,29 @@ impl HubRepository for PgHubRepository {
         .transpose()?)
     }
 
+    async fn claim_due_callbacks(&self, limit: i64) -> AppResult<Vec<ProviderCallback>> {
+        let mut tx = scoped_tx(&self.pool, &AccessScope::System).await?;
+        let rows = sqlx::query(
+            "DELETE FROM hub.sim_callbacks WHERE id IN (
+                 SELECT id FROM hub.sim_callbacks WHERE due_at <= now() ORDER BY due_at LIMIT $1 FOR UPDATE SKIP LOCKED)
+             RETURNING channel, signature, body",
+        )
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                Ok(ProviderCallback {
+                    channel: parse(r.try_get("channel")?)?,
+                    signature: r.try_get("signature")?,
+                    body: r.try_get("body")?,
+                })
+            })
+            .collect::<Result<_, sqlx::Error>>()?)
+    }
+
     async fn sim_log(&self, tenant: Uuid, channel: Channel, direction: &str, summary: &str, payload: &Value) -> AppResult<()> {
         let mut tx = scoped_tx(&self.pool, &AccessScope::Tenant(tenant)).await?;
         sqlx::query(
@@ -943,4 +975,26 @@ fn agent_view(r: &PgRow) -> Result<AgentView, sqlx::Error> {
         heartbeat_at: r.try_get("heartbeat_at")?,
         node_id: r.try_get("node_id")?,
     })
+}
+
+/// Database-backed schedule for the SIMULATED BSP's receipts (any node processes them when due).
+#[async_trait]
+impl super::channels::whatsapp_sim::SimCallbackSink for PgHubRepository {
+    async fn schedule(&self, tenant: Uuid, cb: ProviderCallback, after: std::time::Duration) -> AppResult<()> {
+        let mut tx = scoped_tx(&self.pool, &AccessScope::Tenant(tenant)).await?;
+        sqlx::query(
+            "INSERT INTO hub.sim_callbacks (id, tenant_id, channel, signature, body, due_at)
+             VALUES ($1, $2, $3, $4, $5, now() + make_interval(secs => $6))",
+        )
+        .bind(Uuid::now_v7())
+        .bind(tenant)
+        .bind(cb.channel.as_str())
+        .bind(&cb.signature)
+        .bind(&cb.body)
+        .bind(after.as_secs_f64())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
 }

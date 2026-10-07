@@ -6,7 +6,8 @@
 //! best-effort; clients that miss a push catch up by sequence number on (re)connect.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
@@ -36,12 +37,46 @@ pub struct AgentCtx {
     pub user_id: Uuid,
 }
 
+/// Endpoints almost never change; inbound traffic looks them up on every message.
+const ENDPOINT_CACHE_TTL: StdDuration = StdDuration::from_secs(30);
+/// Tenant status re-checked at most every 2 s per tenant on the message hot path, so a
+/// suspension stops ingest within 2 s (logins and API calls re-check on every request).
+const TENANT_CACHE_TTL: StdDuration = StdDuration::from_secs(2);
+
+/// Tiny TTL cache (per node). Entries are tenant-agnostic lookups keyed by provider address or
+/// tenant id; nothing tenant-private is cached across tenants.
+struct TtlCache<K, V> {
+    ttl: StdDuration,
+    map: Mutex<HashMap<K, (V, Instant)>>,
+}
+
+impl<K: std::hash::Hash + Eq + Clone, V: Clone> TtlCache<K, V> {
+    fn new(ttl: StdDuration) -> Self {
+        Self { ttl, map: Mutex::new(HashMap::new()) }
+    }
+
+    fn get(&self, k: &K) -> Option<V> {
+        let m = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        m.get(k).filter(|(_, at)| at.elapsed() < self.ttl).map(|(v, _)| v.clone())
+    }
+
+    fn put(&self, k: K, v: V) {
+        let mut m = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        if m.len() > 50_000 {
+            m.retain(|_, (_, at)| at.elapsed() < self.ttl);
+        }
+        m.insert(k, (v, Instant::now()));
+    }
+}
+
 pub struct HubService {
     pub repo: Arc<dyn HubRepository>,
     pub bus: Arc<dyn RealtimeBus>,
     pub gate: Arc<dyn TenantGate>,
     adapters: HashMap<Channel, Arc<dyn ChannelAdapter>>,
     pub node_id: String,
+    endpoints: TtlCache<(Channel, String), Endpoint>,
+    tenant_ok: TtlCache<Uuid, bool>,
 }
 
 /// Outcome of processing one provider request.
@@ -61,7 +96,15 @@ impl HubService {
         node_id: String,
     ) -> Self {
         let adapters = adapters.into_iter().map(|a| (a.channel(), a)).collect();
-        Self { repo, bus, gate, adapters, node_id }
+        Self {
+            repo,
+            bus,
+            gate,
+            adapters,
+            node_id,
+            endpoints: TtlCache::new(ENDPOINT_CACHE_TTL),
+            tenant_ok: TtlCache::new(TENANT_CACHE_TTL),
+        }
     }
 
     pub fn adapter(&self, channel: Channel) -> AppResult<&Arc<dyn ChannelAdapter>> {
@@ -112,11 +155,7 @@ impl HubService {
     /// Stores one canonical inbound message. Tenant comes ONLY from the endpoint registry.
     /// Returns the stored message and whether it was a duplicate (already stored earlier).
     pub async fn ingest_message(&self, m: &CanonicalMessage) -> AppResult<(MessageView, bool)> {
-        let ep = self
-            .repo
-            .resolve_endpoint(m.channel, &m.endpoint_address)
-            .await?
-            .ok_or_else(|| AppError::not_found("Unknown channel endpoint (no tenant owns this number/address)"))?;
+        let ep = self.endpoint(m.channel, &m.endpoint_address).await?;
         self.require_tenant_active(ep.tenant_id).await?;
         let appended = self.repo.append_inbound(&ep, m).await?;
         let msg = appended.message;
@@ -133,9 +172,30 @@ impl HubService {
         Ok((msg, false))
     }
 
+    /// Endpoint registry lookup (cached). Unknown addresses are not cached.
+    async fn endpoint(&self, channel: Channel, address: &str) -> AppResult<Endpoint> {
+        let key = (channel, address.to_string());
+        if let Some(ep) = self.endpoints.get(&key) {
+            return Ok(ep);
+        }
+        let ep = self
+            .repo
+            .resolve_endpoint(channel, address)
+            .await?
+            .ok_or_else(|| AppError::not_found("Unknown channel endpoint (no tenant owns this number/address)"))?;
+        self.endpoints.put(key, ep.clone());
+        Ok(ep)
+    }
+
     async fn require_tenant_active(&self, tenant: Uuid) -> AppResult<()> {
+        if self.tenant_ok.get(&tenant) == Some(true) {
+            return Ok(());
+        }
         match self.gate.access_info(tenant).await? {
-            Some(i) if i.allows_access && !i.read_only => Ok(()),
+            Some(i) if i.allows_access && !i.read_only => {
+                self.tenant_ok.put(tenant, true);
+                Ok(())
+            }
             Some(_) => Err(AppError::tenant_suspended()),
             None => Err(AppError::not_found("Unknown tenant")),
         }
@@ -377,6 +437,18 @@ impl HubService {
         Ok(n)
     }
 
+    /// Processes due SIMULATED provider callbacks (receipts) through the normal ingest path.
+    pub async fn sim_callback_tick(&self) -> AppResult<usize> {
+        let due = self.repo.claim_due_callbacks(100).await?;
+        let n = due.len();
+        for cb in due {
+            if let Err(e) = self.ingest_raw(cb.channel, Some(&cb.signature), &cb.body).await {
+                e.log();
+            }
+        }
+        Ok(n)
+    }
+
     /// Safety net for routing races: assign queued conversations an available agent could take.
     pub async fn routing_tick(&self) -> AppResult<usize> {
         let mut n = 0;
@@ -417,34 +489,41 @@ impl HubService {
         voice_skill: &str,
         webchat_skill: &str,
     ) -> AppResult<Vec<Endpoint>> {
-        let n = rand::random::<u32>() % 10_000;
-        let mut out = Vec::new();
-        out.push(
-            self.repo
-                .create_endpoint(
-                    tenant,
-                    Channel::WhatsApp,
-                    &format!("10960{:010}", rand::random::<u64>() % 10_000_000_000),
-                    &format!("+60 3-2000 {n:04} (simulated WhatsApp)"),
-                    whatsapp_skill,
-                )
-                .await?,
-        );
-        out.push(
-            self.repo
-                .create_endpoint(
-                    tenant,
-                    Channel::Voice,
-                    &format!("+6032000{n:04}"),
-                    &format!("+60 3-2000 {n:04} (simulated DID)"),
-                    voice_skill,
-                )
-                .await?,
-        );
-        out.push(
-            self.repo.create_endpoint(tenant, Channel::WebChat, &random_token(24), "Website chat (demo widget)", webchat_skill).await?,
-        );
-        Ok(out)
+        let wa = self
+            .create_unique_endpoint(tenant, Channel::WhatsApp, whatsapp_skill, |n| {
+                (format!("10960{n:010}"), format!("+60 3-{} {} (simulated WhatsApp)", n / 10_000 % 10_000, n % 10_000))
+            })
+            .await?;
+        let voice = self
+            .create_unique_endpoint(tenant, Channel::Voice, voice_skill, |n| {
+                let d = n % 100_000_000;
+                (format!("+603{d:08}"), format!("+60 3-{} {} (simulated DID)", d / 10_000, d % 10_000))
+            })
+            .await?;
+        let chat = self
+            .create_unique_endpoint(tenant, Channel::WebChat, webchat_skill, |_| (random_token(24), "Website chat (demo widget)".into()))
+            .await?;
+        Ok(vec![wa, voice, chat])
+    }
+
+    /// Random simulated address; retried on the (unlikely) collision with an existing endpoint.
+    async fn create_unique_endpoint(
+        &self,
+        tenant: Uuid,
+        channel: Channel,
+        skill: &str,
+        make: impl Fn(u64) -> (String, String),
+    ) -> AppResult<Endpoint> {
+        let mut last = None;
+        for _ in 0..5 {
+            let (address, label) = make(rand::random::<u64>() % 10_000_000_000);
+            match self.repo.create_endpoint(tenant, channel, &address, &label, skill).await {
+                Ok(ep) => return Ok(ep),
+                Err(e) if e.code == crate::platform::errors::ErrorCode::Conflict => last = Some(e),
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| AppError::conflict("Could not allocate a free simulated address")))
     }
 }
 

@@ -15,7 +15,7 @@
     <input id="legal_name" name="legal_name" maxlength="200" value="{{ form.legal_name }}" aria-describedby="legal-err" placeholder="Used on invoices">
     <span id="legal-err" class="field-error">{{ self.err("legal_name") }}</span>
     <label for="tenant_code">Tenant code</label>
-    <input id="tenant_code" name="tenant_code" maxlength="32" pattern="[a-z0-9-]{3,32}" value="{{ form.tenant_code }}" aria-describedby="code-help code-err" placeholder="auto-suggested from the name">
+    <input id="tenant_code" name="tenant_code" maxlength="32" pattern="[a-z0-9\-]{3,32}" value="{{ form.tenant_code }}" aria-describedby="code-help code-err" placeholder="auto-suggested from the name">
     <span id="code-help" class="help">3-32 lowercase letters, digits or hyphens; unique platform-wide; cannot be changed later.</span>
     <span id="code-err" class="field-error">{{ self.err("tenant_code") }}</span>
     <label for="primary_admin_email">First admin email *</label>

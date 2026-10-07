@@ -145,6 +145,14 @@ pub struct SimLogEntry {
     pub created_at: DateTime<Utc>,
 }
 
+/// A provider webhook scheduled for later (the SIMULATED BSP's receipts; ADR-0012).
+#[derive(Debug, Clone)]
+pub struct ProviderCallback {
+    pub channel: Channel,
+    pub signature: String,
+    pub body: Vec<u8>,
+}
+
 /// Re-queued work for an agent whose heartbeat stopped.
 #[derive(Debug, Clone)]
 pub struct ReapedAgent {
@@ -217,6 +225,9 @@ pub trait HubRepository: Send + Sync {
         expires_at: DateTime<Utc>,
     ) -> AppResult<Uuid>;
     async fn customer_session(&self, token_hash: &[u8]) -> AppResult<Option<CustomerSession>>;
+
+    /// Takes simulated provider callbacks that are due (each is handed to exactly one caller).
+    async fn claim_due_callbacks(&self, limit: i64) -> AppResult<Vec<ProviderCallback>>;
 
     // Simulator console log (SIMULATED providers only)
     async fn sim_log(&self, tenant: Uuid, channel: Channel, direction: &str, summary: &str, payload: &Value) -> AppResult<()>;

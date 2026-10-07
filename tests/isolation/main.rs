@@ -481,6 +481,9 @@ mod hub_isolation {
                 .patch(&format!("/v1/tenants/{}/status", x.a.tenant_id), &x.h.sa, json!({ "status": "suspended", "reason": "test" }))
                 .await;
         assert_eq!(r.status, StatusCode::OK, "{}", r.text);
+        // Logins/API/sockets re-check the tenant on every request; the message hot path caches a
+        // positive status for at most 2 s (ADR-0011).
+        tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
         let (st, body) = x.h.whatsapp_inbound(&x.a.whatsapp, "60190000003", "hello?", &wamid()).await;
         assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(body["error"]["code"], "TENANT_SUSPENDED");

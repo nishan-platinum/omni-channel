@@ -19,7 +19,7 @@
     <label for="password">Password</label>
     <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
     <label for="tenant_code">Organisation code <span class="muted">(optional)</span></label>
-    <input id="tenant_code" name="tenant_code" type="text" maxlength="32" pattern="[a-z0-9-]{3,32}" value="{{ tenant_code }}">
+    <input id="tenant_code" name="tenant_code" type="text" maxlength="32" pattern="[a-z0-9\-]{3,32}" value="{{ tenant_code }}">
     <button type="submit" class="btn btn-primary">Sign in</button>
   </form>
 </section>

@@ -30,7 +30,7 @@ use crate::modules::m10_hub::application::HubService;
 use crate::modules::m10_hub::infrastructure::bus::{LocalBus, RedisBus};
 use crate::modules::m10_hub::infrastructure::channels::sip_sim::SimSipAdapter;
 use crate::modules::m10_hub::infrastructure::channels::webchat::WebChatAdapter;
-use crate::modules::m10_hub::infrastructure::channels::whatsapp_sim::{SimCallback, SimWhatsAppAdapter};
+use crate::modules::m10_hub::infrastructure::channels::whatsapp_sim::SimWhatsAppAdapter;
 use crate::modules::m10_hub::infrastructure::persistence::PgHubRepository;
 use crate::platform::config::AppConfig;
 use crate::platform::db::{self, Db};
@@ -50,24 +50,10 @@ pub struct AppInner {
     /// M10 hub (gateway slice) and this node's live WebSocket sessions.
     pub hub: Arc<HubService>,
     pub sessions: Arc<SessionRegistry>,
-    /// Receipts emitted by the SIMULATED WhatsApp BSP, processed via the webhook ingest path.
-    pub sim_callbacks: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<SimCallback>>,
-}
-
-impl AppInner {
-    /// Processes pending simulated-provider callbacks (receipts). The background worker does this
-    /// continuously; tests without background workers call it directly.
-    pub async fn drain_sim_callbacks(&self) -> usize {
-        let mut rx = self.sim_callbacks.lock().await;
-        let mut n = 0;
-        while let Ok(cb) = rx.try_recv() {
-            n += 1;
-            if let Err(e) = self.hub.ingest_raw(cb.channel, Some(&cb.signature), &cb.body).await {
-                e.log();
-            }
-        }
-        n
-    }
+    /// Admission control for customer WebSocket handshakes (token lookup + history replay hit the
+    /// database). A reconnect storm — e.g. every client of a crashed node arriving at once — then
+    /// queues here instead of starving the pool for message traffic.
+    pub ws_admission: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Clone)]
@@ -165,14 +151,14 @@ pub async fn build_state(config: AppConfig, clock: Arc<dyn Clock>) -> anyhow::Re
     };
     let sessions = Arc::new(SessionRegistry::new());
     bus.start(sessions.clone());
-    let (sim_tx, sim_rx) = tokio::sync::mpsc::unbounded_channel();
+    let hub_repo = Arc::new(PgHubRepository::new(db.app.clone()));
     let adapters: Vec<Arc<dyn ChannelAdapter>> = vec![
-        Arc::new(SimWhatsAppAdapter::new(&config.hub_sim_whatsapp_app_secret, sim_tx)),
+        Arc::new(SimWhatsAppAdapter::new(&config.hub_sim_whatsapp_app_secret, hub_repo.clone())),
         Arc::new(SimSipAdapter::new(&config.hub_sim_sip_secret)),
         Arc::new(WebChatAdapter),
     ];
     let hub = Arc::new(HubService::new(
-        Arc::new(PgHubRepository::new(db.app.clone())),
+        hub_repo,
         bus,
         Arc::new(M01TenantGate { pool: db.app.clone(), default_idle_minutes: config.default_session_idle_minutes }),
         adapters,
@@ -181,6 +167,7 @@ pub async fn build_state(config: AppConfig, clock: Arc<dyn Clock>) -> anyhow::Re
     hub.connect_adapters().await.map_err(|e| anyhow::anyhow!(e.to_string()))?;
     tracing::info!(node = %config.node_id, bus = hub.bus.name(), "M10 hub ready");
 
+    let db_max = config.db_max_connections as usize;
     let state = AppState(Arc::new(AppInner {
         config,
         db,
@@ -191,7 +178,7 @@ pub async fn build_state(config: AppConfig, clock: Arc<dyn Clock>) -> anyhow::Re
         dispatcher,
         hub,
         sessions,
-        sim_callbacks: tokio::sync::Mutex::new(sim_rx),
+        ws_admission: Arc::new(tokio::sync::Semaphore::new((db_max / 2).max(4))),
     }));
     if state.config.hub_demo_seed {
         // Several nodes may start together against an empty database: retry once after a
@@ -238,7 +225,8 @@ pub fn spawn_background(state: &AppState) {
 }
 
 /// Hub workers (every node runs them; row locks make them safe to run concurrently):
-/// outbound delivery, routing safety net, presence reaper, simulated-provider receipts.
+/// outbound delivery, routing safety net, presence reaper, simulated-provider receipts (due rows
+/// in `hub.sim_callbacks`, processed by whichever node gets there first).
 fn spawn_hub_workers(state: &AppState) {
     let s = state.clone();
     tokio::spawn(async move {
@@ -272,10 +260,10 @@ fn spawn_hub_workers(state: &AppState) {
     });
     let s = state.clone();
     tokio::spawn(async move {
+        let mut t = tokio::time::interval(Duration::from_millis(200));
         loop {
-            let next = { s.sim_callbacks.lock().await.recv().await };
-            let Some(cb) = next else { return };
-            if let Err(e) = s.hub.ingest_raw(cb.channel, Some(&cb.signature), &cb.body).await {
+            t.tick().await;
+            if let Err(e) = s.hub.sim_callback_tick().await {
                 e.log();
             }
         }

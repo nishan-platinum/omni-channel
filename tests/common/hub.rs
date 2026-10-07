@@ -140,8 +140,8 @@ impl HubApp {
     /// same database may process the queue too, so the outcome is polled, not assumed).
     pub async fn pump_until<F: Fn(&Value) -> bool>(&self, token: &str, conversation: &str, done: F) -> Value {
         for _ in 0..80 {
-            let _ = self.app.state.hub.delivery_tick().await;
-            self.app.state.drain_sim_callbacks().await;
+            self.app.state.hub.delivery_tick().await.expect("delivery tick");
+            self.app.state.hub.sim_callback_tick().await.expect("simulated callback tick");
             let r = self.app.get(&format!("/v1/hub/conversations/{conversation}/messages"), token).await;
             if done(r.data()) {
                 return r.data().clone();

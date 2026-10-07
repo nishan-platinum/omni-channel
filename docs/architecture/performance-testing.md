@@ -91,3 +91,31 @@ startup 607 ms from process start to listening on an empty database (all control
 
 NFR-003 single-record API ≤ 500 ms P95 and NFR-001 page ≤ 2 s P95 are met with large margin in the
 reference run; capacity targets (NFR-004/005) require production-sized data and are out of scope for M01.
+
+## M10 hub gateway (ADR-0011)
+
+The gateway is measured with the bundled driver `target/release/hub_load` (Rust, tokio-tungstenite,
+4 KiB client socket buffers). It uses the development demo tenant (`HUB_DEMO_SEED=true`); each scenario
+creates its own agent pool and simulated channels routed to a scenario-specific skill, and empties that
+pool's backlog before and after the run, so measurements never mix with manual demo use.
+
+| Scenario | Command | Measures |
+|---|---|---|
+| idle sessions | `hub_load idle --sessions N --hold S --hosts 127.0.0.1,…,127.0.0.8` | connected / failed / dropped customer sockets, ramp time; sample server RSS during the hold |
+| delivery latency | `hub_load latency --customers C --messages M --interval-ms 600` | ack latency (send → ack after commit) and delivery latency (customer send → agent socket), msg/s |
+| fault tolerance | `scripts/hub_cluster_test.sh` (`hub_load chaos` through nginx) | every acknowledged message stored gap-free and delivered to an agent across SIGKILL of one node and a SIGTERM rolling restart of the other |
+| functional | `hub_load smoke` (part of `scripts/smoke_test.sh`) | WhatsApp → agent → reply → receipts read; web chat both ways |
+
+Notes:
+* Keep `--interval-ms ≥ 500`: the per-customer inbound limit is 20 messages / 10 s (OCC-M10-R041).
+* One client IP pair has ≈ 28k ephemeral ports; spread ≥ 30k sockets over several loopback addresses
+  (`--hosts`). Raise `ulimit -n` for client and server.
+* Measure on a release build with `ACCESS_LOG=false`; record CPU, RAM, Docker version and git revision.
+
+First results and the changes they forced (4 KiB socket buffers, reader/writer split per socket,
+handshake admission control, single-statement inbound append, optimistic single-agent routing locks):
+[`bench-results/20261007T083045Z-hub/summary.md`](../../bench-results/20261007T083045Z-hub/summary.md).
+
+Browser check (manual or automated): sign in as an agent at `/agent`, open `/chat/{widget}` in another
+browser context, exchange messages, observe the `read` receipt, reload both pages. This was automated once
+with Playwright in a throw-away container (not part of the repository, which has no npm pipeline).

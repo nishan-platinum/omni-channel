@@ -23,7 +23,7 @@ jobs:
       - run: cargo test --lib
 
   integration:
-    name: PostgreSQL / MySQL / isolation tests
+    name: PostgreSQL / MySQL / isolation / hub tests
     runs-on: ubuntu-latest
     needs: quality
     services:
@@ -45,6 +45,11 @@ jobs:
         ports: ["55433:5432"]
         options: >-
           --health-cmd "pg_isready -U tenant_admin -d postgres" --health-interval 3s --health-timeout 3s --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports: ["56379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 3s --health-timeout 3s --health-retries 30
       tenant-mysql:
         image: mysql:8.4
         env:
@@ -69,6 +74,8 @@ jobs:
         run: cargo test --test postgres --test mysql -- --test-threads=4
       - name: M01 application / API / UI tests
         run: cargo test --test m01 -- --test-threads=4
+      - name: M10 hub gateway tests (WebSockets, routing, simulated channels)
+        run: cargo test --test hub -- --test-threads=4
 
   docker:
     name: Docker image builds

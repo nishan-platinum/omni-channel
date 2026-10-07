@@ -17,8 +17,11 @@ pub enum Push {
 }
 
 /// Bounded so a stuck client cannot grow memory; on overflow the session is closed and the client
-/// resumes from its last sequence number.
-pub const SESSION_BUFFER: usize = 64;
+/// resumes from its last sequence number. Customers receive few events and are the 100k-scale
+/// population, so their buffer is small; agents are few but get bursts (coming online to a full
+/// queue assigns up to their capacity at once, each with replayed history).
+pub const CUSTOMER_BUFFER: usize = 64;
+pub const AGENT_BUFFER: usize = 1024;
 
 #[derive(Default)]
 struct Slots {
@@ -60,7 +63,10 @@ impl SessionRegistry {
 
     pub fn register(&self, target: Target) -> Registration {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel(SESSION_BUFFER);
+        let (tx, rx) = mpsc::channel(match target {
+            Target::Agent { .. } => AGENT_BUFFER,
+            Target::Customer { .. } => CUSTOMER_BUFFER,
+        });
         match target {
             Target::Agent { .. } => self.agents.fetch_add(1, Ordering::Relaxed),
             Target::Customer { .. } => self.customers.fetch_add(1, Ordering::Relaxed),
@@ -174,7 +180,7 @@ mod tests {
         let r = SessionRegistry::new();
         let a = Target::Customer { endpoint: Uuid::from_u128(1), visitor: "v".into() };
         let _reg = r.register(a.clone());
-        for _ in 0..SESSION_BUFFER {
+        for _ in 0..CUSTOMER_BUFFER {
             assert_eq!(r.push(&a, Arc::from("{}")), 1);
         }
         assert_eq!(r.push(&a, Arc::from("{}")), 0);

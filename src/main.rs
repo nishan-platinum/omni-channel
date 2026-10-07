@@ -1,4 +1,5 @@
-//! Binary entry point: configuration, tracing, state wiring, background workers, HTTP server.
+//! Binary entry point: configuration, tracing, state wiring, background workers, HTTP server
+//! with graceful shutdown (WebSocket sessions are told to reconnect elsewhere).
 
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = build_state(config.clone(), Arc::new(SystemClock)).await?;
     spawn_background(&state);
+    let sessions = state.sessions.clone();
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
@@ -27,10 +29,37 @@ async fn main() -> anyhow::Result<()> {
         "listening"
     );
     axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutdown signal received");
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            // Rolling deploy: every live WebSocket gets `reconnect` + close 1012, so clients move
+            // to another node and resume by sequence number. Give the close frames a moment.
+            let (agents, customers) = sessions.counts();
+            tracing::info!(agents, customers, "shutdown signal received; draining WebSocket sessions");
+            sessions.begin_shutdown();
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         })
         .await?;
     Ok(())
+}
+
+/// Ctrl-C locally, SIGTERM from Docker/Kubernetes.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

@@ -1,4 +1,4 @@
-# DESIGN — M01 Multi-Tenancy & Tenant Management (Rust)
+# DESIGN — M01 Multi-Tenancy & Tenant Management + M10 hub gateway slice (Rust)
 
 Living design document. Decisions with alternatives are recorded as ADRs in `docs/decisions/`.
 
@@ -7,8 +7,9 @@ Living design document. Decisions with alternatives are recorded as ADRs in `doc
 A working, measurable Rust implementation of **M01 — Multi-Tenancy & Tenant Management** from the
 *TM CPaaS Omni Channel CRM — Unified Functional & Design Specification v2.0*, built so that correctness,
 performance, resource usage and developer experience can be compared with implementations in other
-languages. Scope: all M01 P1 and P2 requirements (27; see `docs/requirements/`). Every other module
-(M02–M40) is represented only by ports and labelled reference adapters.
+languages. Scope: all M01 P1 and P2 requirements (27; see `docs/requirements/`) plus the **M10
+omnichannel hub gateway slice** (§20, ADR-0011/0012). Every other module (M02–M40) is represented only
+by ports and labelled reference adapters; WhatsApp and SIP are labelled simulators.
 
 ## 2. Stack (ADR-0001)
 
@@ -43,7 +44,12 @@ src/
     application/           use cases + ports (repository and external-module traits)
     infrastructure/        persistence (SQLx), tenant_data (router + PG/MySQL stores), adapters, gate
     web/                   /v1 API, Super Admin UI, Tenant Admin UI, shared page builders, view models
-templates/ static/ migrations/{control,tenant} config/ tests/ scripts/ docs/
+  modules/m10_hub/         gateway slice (§20): domain (routing rule, statuses), application (service,
+                           ports, session registry), infrastructure (PG repository, Redis bus, simulated
+                           channels), web (WebSockets, webhooks, /v1/hub API, agent/chat/admin/simulator)
+  demo_seed.rs             development-only demo tenant, agents and simulated channels
+  bin/hub_load.rs          gateway driver: smoke, idle sessions, latency, chaos (zero-loss check)
+templates/ static/ migrations/{control,tenant} config/ docker/lb tests/ scripts/ docs/
 ```
 
 Dependency rules (enforced by review and module visibility; see AGENTS.md §4): domain depends on nothing
@@ -250,3 +256,38 @@ callers (→ M21 and channel modules), `DownstreamProvisioningPort` (→ M23 etc
 & `EmailSenderVerificationPort` (→ M06/DNS/TLS), `KeyManagementPort` (→ KMS/HSM), `ObjectStoragePort`
 (→ S3-class store), `ReleaseManagementPort` (→ CI/CD), `AnonymisedDataCopyPort` (→ M29/M38),
 `ExportParticipant` registry (→ every data-owning module), `EnvSecretResolver` (→ vault).
+
+## 20. M10 hub — gateway slice (ADR-0011, ADR-0012)
+
+Requirements: `docs/requirements/m10-hub-requirements.md`; traceability: `m10-hub-traceability.md`.
+
+```
+WhatsApp webhook ─┐  (signed, SIMULATED)          ┌─ agent sockets  (/v1/hub/ws/agent)
+SBC event feed  ──┼─► ChannelAdapter.ingest ──►   │
+customer socket ──┘   CanonicalMessage            │
+                      │ endpoint registry → tenant│
+                      ▼                           │
+         PostgreSQL hub.*  (RLS)  ── route ──► assignment ── Redis pub/sub ──► every node's
+         append (seq, idempotency) · presence · queue                         SessionRegistry ─┘
+                      │
+                      └─ outbound_queue ─► delivery worker ─► ChannelAdapter.deliver ─► receipts
+```
+
+* **Canonical message**: `CanonicalMessage{channel, endpoint_address, customer_address, kind, body,
+  provider_message_id, idempotency_key}`; tenant = owner of the endpoint (`hub.channel_endpoints`).
+* **Durability**: ack after commit; per-conversation gap-free `seq`; append-only messages and status
+  events; duplicate deliveries and client retries return the stored message.
+* **Routing**: skill + availability + capacity, least utilised; lock only the chosen agent and re-check;
+  drain on Available/close with `SKIP LOCKED`; 2 s routing tick; reaper re-queues work of agents silent
+  for 60 s.
+* **Sessions**: reader/writer per socket, 20 s pings, 60 s idle close, resume by `seq`, 4 KiB socket
+  buffers, bounded push queues, handshake admission control, graceful drain (`reconnect`, 1012).
+* **Multi-node**: any node serves any client (no sticky LB); Redis only fans out; all state that must
+  survive is in PostgreSQL. `docker compose --profile cluster` runs `app1` + `app2` behind nginx.
+* **Agents**: bootstrap role `agent` (scope `hub:agent`), created by the Tenant Admin (M01 `users` quota).
+* **Screens**: `/agent` (agent desktop), `/chat/{widget_key}` (customer), `/hub/admin`, `/hub/simulator`
+  (non-production only). Small vanilla JS (`static/js/hub-*.js`), no build step.
+* **Known limits** (see traceability): no contact/case linking, priority/business-hours/SLA routing,
+  voice-state blending, typing indicators, embeddable widget, WhatsApp templates/24 h window;
+  Regulated tenants' hub data stays in the central cluster; every node runs API + workers + sockets
+  (no separate pods).

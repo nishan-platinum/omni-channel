@@ -8,7 +8,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var widget = root.getAttribute("data-widget");
   var KEY = "occ-chat-" + widget;
-  var st = { token: null, ws: null, lastSeq: 0, seen: {}, retry: 0, pending: {} };
+  var st = { token: null, ws: null, lastSeq: 0, seen: {}, retry: 0, pending: {}, lastFrame: Date.now() };
 
   function store(v) { try { if (v) localStorage.setItem(KEY, v); else localStorage.removeItem(KEY); } catch (e) { /* private mode */ } }
   function load() { try { return localStorage.getItem(KEY); } catch (e) { return null; } }
@@ -55,9 +55,11 @@
     st.ws = ws;
     ws.onopen = function () {
       st.retry = 0;
+      st.lastFrame = Date.now();
       ws.send(JSON.stringify({ type: "auth", token: st.token, last_seq: st.lastSeq }));
     };
     ws.onmessage = function (e) {
+      st.lastFrame = Date.now();
       var f;
       try { f = JSON.parse(e.data); } catch (err) { return; }
       if (f.type === "welcome") {
@@ -123,6 +125,10 @@
 
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") markSeen(); });
   setInterval(function () { if (st.ws && st.ws.readyState === 1) st.ws.send(JSON.stringify({ type: "ping" })); }, 25000);
+  // Watchdog for half-open connections (no frames, not even pongs, for 60 s): reconnect + resume.
+  setInterval(function () {
+    if (st.ws && st.ws.readyState === 1 && Date.now() - st.lastFrame > 60000) st.ws.close();
+  }, 10000);
 
   st.token = load();
   if (st.token) connect();

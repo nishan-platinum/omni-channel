@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end smoke test against a RUNNING stack (docker compose up, or cargo run).
 # Exercises the browser forms (CSRF, sessions), the invitation flow via the development outbox,
-# Tenant Admin isolation and the /v1 API including PostgreSQL and MySQL dedicated tenants.
+# Tenant Admin isolation and the /v1 API including PostgreSQL and MySQL dedicated tenants, then the
+# M10 hub gateway end to end (needs HUB_DEMO_SEED=true; uses target/release/hub_load).
 #
 #   ./scripts/smoke_test.sh [base_url]        (default http://localhost:3000)
 #
@@ -110,6 +111,15 @@ for target in dedicated-pg-my-central dedicated-mysql-my-central; do
   check "$target provisioning" "$(echo "$R" | json '["data"]["provisioning_status"]')" completed
   check "$target isolation smoke test" "$(echo "$R" | json '["data"]["isolation_check_status"]')" passed
 done
+
+echo "== M10 hub gateway (simulated WhatsApp + web chat over WebSockets; demo tenant)"
+check "GET /ready reports the hub bus" "$(curl -s "$BASE/ready" | json '["hub"]["bus_ok"]')" True
+check "WhatsApp verify handshake" "$(curl -s "$BASE/v1/hub/channels/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=${HUB_SIM_WHATSAPP_VERIFY_TOKEN:-dev-sim-verify-token}&hub.challenge=4242")" 4242
+check "unsigned WhatsApp webhook → 401" "$(status -X POST -H 'content-type: application/json' -d '{"object":"whatsapp_business_account","entry":[]}' "$BASE/v1/hub/channels/whatsapp/webhook")" 401
+# The WebSocket flow needs a real client: the hub_load tool (built on demand).
+HUB_LOAD="target/release/hub_load"
+[ -x "$HUB_LOAD" ] || cargo build --release --quiet --bin hub_load
+if "$HUB_LOAD" smoke --base "$BASE"; then ok "hub end-to-end flow (hub_load smoke)"; else bad "hub end-to-end flow (hub_load smoke)"; fi
 
 echo
 echo "Smoke test: $PASS passed, $FAIL failed"

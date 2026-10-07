@@ -3,16 +3,18 @@
 //! * Inbound: Meta Cloud API webhook JSON (`whatsapp_business_account` → entry → changes → value
 //!   with `metadata.phone_number_id`, `contacts`, `messages`, `statuses`), authenticated with
 //!   `X-Hub-Signature-256` over the raw body using the (development) app secret.
-//! * Outbound: an in-process fake BSP. It "sends" the message, then emits signed `delivered`
-//!   and `read` status webhooks that are processed by exactly the same `ingest` path as real
-//!   webhooks. A body containing `[fail]` makes the fake BSP return an error (retry ladder demo).
+//! * Outbound: an in-process fake BSP. It "sends" the message, then schedules signed `delivered`
+//!   and `read` status webhooks (`SimCallbackSink`, stored in the database so any node processes
+//!   them when due) that go through exactly the same `ingest` path as real webhooks. A body
+//!   containing `[fail]` makes the fake BSP return an error (retry ladder demo).
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+
 use uuid::Uuid;
 
 use crate::platform::errors::{AppError, AppResult};
@@ -22,22 +24,24 @@ use super::super::super::domain::{CanonicalMessage, CanonicalStatus, Channel, De
 use super::{sign, signature_valid};
 
 /// A signed webhook the fake BSP wants delivered back to the hub.
-#[derive(Debug, Clone)]
-pub struct SimCallback {
-    pub channel: Channel,
-    pub signature: String,
-    pub body: Vec<u8>,
+pub use super::super::super::application::ports::ProviderCallback as SimCallback;
+
+/// Where the fake BSP schedules its future webhooks (database-backed in the app, in-memory in
+/// unit tests).
+#[async_trait]
+pub trait SimCallbackSink: Send + Sync {
+    async fn schedule(&self, tenant: Uuid, callback: SimCallback, after: Duration) -> AppResult<()>;
 }
 
 pub struct SimWhatsAppAdapter {
     app_secret: Vec<u8>,
-    callbacks: mpsc::UnboundedSender<SimCallback>,
+    callbacks: Arc<dyn SimCallbackSink>,
     delivered_after: Duration,
     read_after: Duration,
 }
 
 impl SimWhatsAppAdapter {
-    pub fn new(app_secret: &str, callbacks: mpsc::UnboundedSender<SimCallback>) -> Self {
+    pub fn new(app_secret: &str, callbacks: Arc<dyn SimCallbackSink>) -> Self {
         Self {
             app_secret: app_secret.as_bytes().to_vec(),
             callbacks,
@@ -191,20 +195,14 @@ impl ChannelAdapter for SimWhatsAppAdapter {
             return Err(DeliveryError("SIMULATED BSP error: 503 Service Unavailable (message contains [fail])".into()));
         }
         let wamid = format!("wamid.SIM.{}", Uuid::now_v7().simple());
-        let tx = self.callbacks.clone();
-        let secret = self.app_secret.clone();
-        let (pnid, to, id) = (job.endpoint_address.clone(), job.customer_address.clone(), wamid.clone());
-        let (d1, d2) = (self.delivered_after, self.read_after);
-        tokio::spawn(async move {
-            for (delay, status) in [(d1, "delivered"), (d2.saturating_sub(d1), "read")] {
-                tokio::time::sleep(delay).await;
-                let body = status_payload(&pnid, &id, &to, status).to_string().into_bytes();
-                let signature = sign(&secret, &body);
-                if tx.send(SimCallback { channel: Channel::WhatsApp, signature, body }).is_err() {
-                    return;
-                }
-            }
-        });
+        for (after, status) in [(self.delivered_after, "delivered"), (self.read_after, "read")] {
+            let body = status_payload(&job.endpoint_address, &wamid, &job.customer_address, status).to_string().into_bytes();
+            let signature = sign(&self.app_secret, &body);
+            self.callbacks
+                .schedule(job.tenant_id, SimCallback { channel: Channel::WhatsApp, signature, body }, after)
+                .await
+                .map_err(|e| DeliveryError(format!("SIMULATED BSP could not schedule receipts: {}", e.message)))?;
+        }
         Ok(wamid)
     }
 
@@ -226,9 +224,20 @@ impl ChannelAdapter for SimWhatsAppAdapter {
 mod tests {
     use super::*;
 
-    fn adapter() -> (SimWhatsAppAdapter, mpsc::UnboundedReceiver<SimCallback>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (SimWhatsAppAdapter::new("test-app-secret-0123456789", tx), rx)
+    #[derive(Default)]
+    struct MemSink(std::sync::Mutex<Vec<(Duration, SimCallback)>>);
+
+    #[async_trait]
+    impl SimCallbackSink for MemSink {
+        async fn schedule(&self, _tenant: Uuid, callback: SimCallback, after: Duration) -> AppResult<()> {
+            self.0.lock().unwrap().push((after, callback));
+            Ok(())
+        }
+    }
+
+    fn adapter() -> (SimWhatsAppAdapter, Arc<MemSink>) {
+        let sink = Arc::new(MemSink::default());
+        (SimWhatsAppAdapter::new("test-app-secret-0123456789", sink.clone()), sink)
     }
 
     #[test]
@@ -271,7 +280,7 @@ mod tests {
 
     #[tokio::test]
     async fn fake_bsp_emits_signed_receipts_and_fails_on_marker() {
-        let (a, mut rx) = adapter();
+        let (a, sink) = adapter();
         let mut job = OutboundJob {
             message_id: Uuid::now_v7(),
             tenant_id: Uuid::now_v7(),
@@ -284,8 +293,10 @@ mod tests {
             body: "hello".into(),
         };
         let wamid = a.deliver(&job).await.unwrap();
-        for expected in [DeliveryStatus::Delivered, DeliveryStatus::Read] {
-            let cb = rx.recv().await.unwrap();
+        let scheduled = sink.0.lock().unwrap().clone();
+        assert_eq!(scheduled.len(), 2);
+        assert!(scheduled[0].0 < scheduled[1].0, "delivered is due before read");
+        for ((_, cb), expected) in scheduled.iter().zip([DeliveryStatus::Delivered, DeliveryStatus::Read]) {
             let ev = a.ingest(Some(&cb.signature), &cb.body).unwrap();
             assert!(matches!(&ev[0], Inbound::Status(s) if s.status == expected && s.provider_message_id == wamid));
         }

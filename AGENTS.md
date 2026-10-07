@@ -7,7 +7,8 @@ This contract binds every human or AI agent changing this repository. `CLAUDE.md
 * The PDF in `docs/specification/` (*TM CPaaS Omni Channel CRM — Unified Functional & Design
   Specification v2.0*) is the **functional** source of truth. It is confidential: never commit it,
   never paste large portions of it into the repo, never expose its text through the application.
-* `docs/requirements/m01-requirements.md` is the extracted, paraphrased requirement set.
+* `docs/requirements/m01-requirements.md` and `docs/requirements/m10-hub-requirements.md` are the
+  extracted, paraphrased requirement sets.
 * Precedence when material conflicts: (1) unified requirements + cross-cutting registers/standards,
   (2) unified module chapter, (3) field/API/state registers, (4) carried-over narrative,
   (5) historical technology details. Unresolvable conflicts → document in `DESIGN.md`
@@ -20,17 +21,21 @@ are forbidden; translate historical references (Laravel middleware → Tower/Axu
 SQLx repositories, Laravel events → typed Rust domain events, Angular → Askama SSR + HTMX).
 
 ## 3. Scope
-* Only M01 (all P1 and P2 requirements). Do not build M02–M40.
+* M01 (all P1 and P2 requirements) and the **M10 hub gateway slice** (ADR-0011): channel adapters,
+  canonical messages, durable ordered store, skill routing, presence, agent/customer WebSockets,
+  multi-node. Do not build the rest of M10 or M02–M40 without an ADR.
+* WhatsApp and SIP are **simulated** adapters (ADR-0012). Label them "simulated" in code, UI and docs.
 * Dependencies on other modules are **ports** (`application/ports.rs`) with **reference adapters**
   (`infrastructure/adapters.rs`). Label every reference adapter as such in code, UI and docs.
 * Do not invent business requirements. If something is needed only to make the prototype operable
-  (e.g. bootstrap auth, reference plans), mark it as an implementation aid in the traceability notes.
+  (e.g. bootstrap auth, reference plans, the hub demo seed), mark it as an implementation aid in the
+  traceability notes.
 * Do not change the architecture silently: ADR first.
 
 ## 4. Architecture rules
 | Layer | May depend on | Must not |
 |---|---|---|
-| `modules/m01_tenancy/domain` | std, serde, chrono, uuid, regex | Axum, Askama, SQLx, HTTP types |
+| `modules/m01_tenancy/domain`, `modules/m10_hub/domain` | std, serde, chrono, uuid, regex | Axum, Askama, SQLx, HTTP types |
 | `modules/m01_tenancy/application` | domain, port traits, `platform` primitives | SQL, HTTP |
 | `modules/m01_tenancy/infrastructure` | SQLx, adapters, application ports | HTTP handlers, templates |
 | `modules/m01_tenancy/web` | application services, view models | SQL, business rules |
@@ -59,10 +64,14 @@ SQLx repositories, Laravel events → typed Rust domain events, Angular → Aska
   server-side catalogue file; credentials from `secret_ref` (environment adapter, `TENANT_DB_*` only).
 * MySQL has **no** RLS: isolation there is the dedicated database boundary plus repository-level
   `tenant_id` checks. Never claim otherwise.
+* Hub (`hub.*`): FORCE RLS on every table; inbound provider traffic gets its tenant **only** from the
+  endpoint registry (`hub.channel_endpoints`), never from payload fields; platform scope sees no hub
+  rows; agents only see conversations assigned to them.
 
 ## 6. Tests and verification
 * Every requirement implemented gets at least one test; trace it in
-  `docs/requirements/m01-traceability.md` (status vocabulary is defined there).
+  `docs/requirements/m01-traceability.md` or `docs/requirements/m10-hub-traceability.md` (status
+  vocabulary is defined there).
 * Domain rules → unit tests in the domain module. Use cases, HTTP, isolation, PostgreSQL and MySQL →
   integration tests under `tests/` (they need the Docker databases).
 * Isolation tests (`tests/isolation`) are release blockers. A failing isolation test is never
@@ -73,6 +82,7 @@ SQLx repositories, Laravel events → typed Rust domain events, Angular → Aska
   cargo clippy --all-targets --all-features -- -D warnings
   cargo test --all-features
   docker compose up --build   # then ./scripts/smoke_test.sh
+  ./scripts/hub_cluster_test.sh   # for hub changes: 2 nodes, node kill, rolling restart
   ```
 * Failed or skipped tests cannot be reported as completion. Report exact results.
 

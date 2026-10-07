@@ -1,11 +1,13 @@
-# CLAUDE.md — TM CPaaS Omni Channel CRM · M01 (Rust)
+# CLAUDE.md — TM CPaaS Omni Channel CRM · M01 + M10 hub (Rust)
 
 **Read `DESIGN.md` before changing code. Follow `AGENTS.md` (the full operating contract).**
 
 ## What this is
-A **Rust** implementation of **M01 — Multi-Tenancy & Tenant Management** only, built for a
-cross-language performance/correctness comparison. Functional source of truth: the confidential PDF in
-`docs/specification/` (git-ignored). Extracted requirements: `docs/requirements/m01-requirements.md`.
+A **Rust** implementation of **M01 — Multi-Tenancy & Tenant Management** plus the **M10 omnichannel hub
+gateway slice** (channel adapters → canonical messages → durable ordered store → skill routing → agent and
+customer WebSockets, multi-node). Functional source of truth: the confidential PDF in `docs/specification/`
+(git-ignored). Extracted requirements: `docs/requirements/m01-requirements.md`,
+`docs/requirements/m10-hub-requirements.md`.
 
 ## Stack (non-negotiable)
 Rust · Axum · Tokio · Askama (server-rendered) · HTMX (small, optional) · SQLx · Serde · Tower ·
@@ -16,9 +18,11 @@ npm build pipelines, `composer.json`, `artisan`, `*.php`. Laravel/Angular mentio
 historical — translate them (see `docs/decisions/ADR-0001-rust-stack-and-ssr.md`).
 
 ## Scope
-M01 only (P1 + P2). Other modules (M02, M19, M21, M23, M25, M29, M30 …) are **ports + clearly-labelled
-reference adapters** in `src/modules/m01_tenancy/infrastructure/adapters.rs` (+ `tenant_data/targets.rs`, `gate.rs`). Never claim a stub is a
-production integration.
+M01 (P1 + P2) and the M10 hub gateway slice (`src/modules/m10_hub/`, ADR-0011). WhatsApp and SIP are
+**SIMULATED** channel adapters (ADR-0012) — there are no real provider credentials; never claim otherwise.
+Other modules (M02, M13, M19, M21, M23, M25, M29, M30 …) are **ports + clearly-labelled reference
+adapters** in `src/modules/m01_tenancy/infrastructure/adapters.rs` (+ `tenant_data/targets.rs`, `gate.rs`).
+Never claim a stub or simulator is a production integration.
 
 ## Rules that must never be broken
 1. **Tenant isolation.** Tenant context comes only from the authenticated server-side session/token.
@@ -26,23 +30,26 @@ production integration.
    `platform::db::scoped_tx` (sets `app.scope`/`app.tenant_id` per transaction; RLS fails closed).
    Super Admin cross-tenant access is explicit (`AccessScope::Platform`) and audited.
 2. **No SQL in web handlers.** SQL lives in `infrastructure/` only. Domain has no Axum/SQLx/Askama deps.
-3. **Traceability.** Any requirement work cites its ID (OCC-M01-Rnnn, BR-M01-nnn, FD-nnn, NT-nnn) and
-   updates `docs/requirements/m01-traceability.md`.
+3. **Traceability.** Any requirement work cites its ID (OCC-M01-Rnnn, OCC-M10-Rnnn, BR-M01-nnn, FD-nnn,
+   NT-nnn, FR-ARC-nnn) and updates `docs/requirements/m01-traceability.md` or `m10-hub-traceability.md`.
 4. **No secrets** in code, logs, DB rows or API responses (DB passwords via `secret_ref` only).
+5. **Hub durability.** Acknowledge a message only after its transaction commits; keep per-conversation
+   sequence numbers gap-free; inbound tenant comes only from `hub.channel_endpoints` (never the payload).
 
 ## Commands
 ```bash
 cp .env.example .env
 docker compose up --build                 # full stack → http://localhost:3000
-docker compose up -d central-db tenant-pg tenant-mysql   # DBs only, then:
+docker compose up -d central-db tenant-pg tenant-mysql redis   # DBs + Redis only, then:
 cargo run                                 # local app against Docker DBs
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features                 # needs the Docker DBs (unit tests: cargo test --lib)
-./scripts/smoke_test.sh                   # end-to-end HTTP smoke against a running app
-./scripts/benchmark.sh                    # see docs/architecture/performance-testing.md
+./scripts/smoke_test.sh                   # end-to-end HTTP smoke (incl. hub flow via hub_load) against a running app
+./scripts/hub_cluster_test.sh             # 2 hub nodes + nginx: node kill + rolling restart, zero acked loss
+./scripts/benchmark.sh                    # M01 API; hub: target/release/hub_load idle|latency (performance-testing.md)
 ```
 
 ## Definition of done
 Never claim completion on `cargo build` alone. fmt + clippy (-D warnings) + all tests (including
-isolation tests) + Docker startup + smoke test must pass. Failed or skipped tests are not "done".
+isolation tests) + Docker startup + smoke test (+ cluster test for hub changes) must pass. Failed or skipped tests are not "done".
