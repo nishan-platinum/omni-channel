@@ -1,0 +1,8 @@
+<div class="plan-features">
+  <p class="help">{{ tier }} tier — features this plan entitles (others cannot be enabled):</p>
+  <ul class="chips">
+  {% for (key, label, entitled) in features %}
+    <li class="chip {% if *entitled %}chip-on{% else %}chip-off{% endif %}" title="{{ key }}">{{ label }}</li>
+  {% endfor %}
+  </ul>
+</div>

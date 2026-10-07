@@ -1,0 +1,42 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+{% include "tenants/_tabs.html" %}
+<div class="grid2">
+<section class="card">
+  <h2>Storage strategy &amp; database routing</h2>
+  {% if let Some(c) = conn.as_ref() %}
+  <dl class="kv">
+    <dt>Strategy</dt><dd>{{ c.storage_strategy.label() }}</dd>
+    <dt>Engine</dt><dd>{{ c.engine.label() }} {% if c.engine.supports_rls() %}<span class="tag">RLS enforced</span>{% else %}<span class="tag">no RLS — dedicated database + per-tenant login boundary</span>{% endif %}</dd>
+    <dt>Target</dt><dd><code>{{ c.target_name }}</code></dd>
+    <dt>Host</dt><dd>{% if let Some(h) = c.host.as_ref() %}{{ h }}{% if let Some(p) = c.port %}:{{ p }}{% endif %}{% else %}central PostgreSQL cluster{% endif %}</dd>
+    <dt>Database</dt><dd><code>{{ c.database_name }}</code></dd>
+    <dt>Schema</dt><dd>{% if let Some(s) = c.schema_name.as_ref() %}<code>{{ s }}</code>{% else %}—{% endif %}</dd>
+    <dt>Region (residency)</dt><dd>{{ c.region.label() }}</dd>
+    <dt>Credentials</dt><dd>{% if c.secret_ref.is_some() %}secret reference held server-side (never displayed){% else %}runtime role <code>crm_app</code> (NOBYPASSRLS){% endif %}</dd>
+    <dt>Status</dt><dd><span class="badge {{ page.badge(c.status.as_str()) }}">{{ c.status }}</span></dd>
+    <dt>Last check</dt><dd>{{ page.odt(c.last_checked_at) }} {% if let Some(ok) = c.last_check_ok %}{% if ok %}<span class="badge badge-ok">ok</span>{% else %}<span class="badge badge-bad">failed</span>{% endif %}{% endif %} {% if let Some(ms) = c.last_latency_ms %}<span class="small muted">{{ ms }} ms</span>{% endif %}
+      {% if let Some(m) = c.last_check_message.as_ref() %}<br><span class="small muted">{{ m }}</span>{% endif %}</dd>
+  </dl>
+  {% if nav.is_sa %}
+  <div class="row-actions">
+    <form method="post" action="{{ nav.base }}/storage/check" class="inline"><input type="hidden" name="_csrf" value="{{ page.csrf }}"><button class="btn" type="submit">Test DB connectivity</button></form>
+    <form method="post" action="{{ nav.base }}/isolation-check" class="inline"><input type="hidden" name="_csrf" value="{{ page.csrf }}"><button class="btn btn-primary" type="submit">Run isolation smoke test</button></form>
+  </div>
+  {% endif %}
+  {% else %}<p class="empty">No data store profile.</p>{% endif %}
+</section>
+<section class="card">
+  <h2>Isolation smoke tests</h2>
+  <p class="help">Cross-tenant reads/writes under a foreign tenant context, missing context and host scope must all fail (R009). A failing test keeps a draft tenant from activation (UJ-19 E1) and raises a security alert.</p>
+  {% if checks.is_empty() %}<p class="empty">No isolation checks yet.</p>{% else %}
+  {% for c in checks %}
+  <details {% if loop.first %}open{% endif %}>
+    <summary>{{ page.dt(c.created_at) }} — {% if c.passed %}<span class="badge badge-ok">passed</span>{% else %}<span class="badge badge-bad">FAILED</span>{% endif %}</summary>
+    <pre class="wrap small">{{ c.results }}</pre>
+  </details>
+  {% endfor %}
+  {% endif %}
+</section>
+</div>
+{% endblock %}

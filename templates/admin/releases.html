@@ -1,0 +1,35 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<h1>Platform releases <span class="tag">reference release manager</span></h1>
+<p class="help">Ring-based rollout (R026, FR-OPS-121): advance a release from host sandbox → early adopters → all tenants. Disruptive releases are scheduled into each tenant's maintenance window; the scheduler applies due rollouts (no real deployment is performed).</p>
+<div class="grid2 wide-left">
+<section class="card">
+  {% if releases.is_empty() %}<p class="empty">No releases yet. Create the first one.</p>{% else %}
+  <table class="compact"><thead><tr><th>Version</th><th>Title</th><th>Status</th><th>Ring</th><th>Rollouts</th><th></th></tr></thead><tbody>
+  {% for (r, scheduled, done) in releases %}
+    <tr>
+      <td><code>{{ r.release_version }}</code>{% if r.disruptive %} <span class="tag">disruptive</span>{% endif %}</td>
+      <td>{{ r.title }}</td>
+      <td><span class="badge {{ page.badge(r.status.as_str()) }}">{{ r.status }}</span></td>
+      <td>{% if let Some(ring) = r.current_ring %}{{ ring.label() }}{% else %}—{% endif %}</td>
+      <td>{{ done }} applied · {{ scheduled }} scheduled</td>
+      <td>{% if r.can_advance() %}
+        <form method="post" action="/admin/releases/{{ r.id }}/advance" class="inline"><input type="hidden" name="_csrf" value="{{ page.csrf }}"><button class="btn btn-small btn-primary" type="submit">Advance to next ring</button></form>
+      {% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody></table>{% endif %}
+</section>
+<section class="card">
+  <h2>New release</h2>
+  <form method="post" action="/admin/releases" class="form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <label for="rv">Version</label><input id="rv" name="release_version" placeholder="1.1.0" required maxlength="20">
+    <label for="rt">Title</label><input id="rt" name="title" required maxlength="200">
+    <label for="rn">Release notes (shown in-app to tenants)</label><textarea id="rn" name="notes" rows="5" required maxlength="10000"></textarea>
+    <label class="check"><input type="checkbox" name="disruptive" value="true"> Disruptive change (honour maintenance windows)</label>
+    <button class="btn btn-primary" type="submit">Create release</button>
+  </form>
+</section>
+</div>
+{% endblock %}

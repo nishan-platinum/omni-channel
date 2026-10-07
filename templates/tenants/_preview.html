@@ -1,0 +1,5 @@
+{% if let Some(e) = error.as_ref() %}<p class="field-error" role="alert">{{ e }}</p>{% endif %}
+<div class="preview" style="--p: {{ primary }}; --s: {{ secondary }}">
+  <div class="preview-bar"><span>Preview</span></div>
+  <div class="preview-body"><button type="button" class="preview-btn">Primary action</button> <span class="preview-accent">Accent</span></div>
+</div>

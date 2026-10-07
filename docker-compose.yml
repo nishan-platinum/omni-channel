@@ -1,0 +1,85 @@
+# Local runtime for the M01 Rust prototype:
+#   cp .env.example .env && docker compose up --build   →  http://localhost:3000
+name: omni-m01
+
+services:
+  central-db:
+    image: postgres:16-alpine
+    command: ["postgres", "-c", "max_connections=300", "-c", "shared_buffers=256MB"]
+    environment:
+      POSTGRES_DB: omni_control
+      POSTGRES_USER: crm_owner
+      POSTGRES_PASSWORD: ${POSTGRES_OWNER_PASSWORD:?set POSTGRES_OWNER_PASSWORD in .env}
+      CRM_APP_PASSWORD: ${CRM_APP_PASSWORD:?set CRM_APP_PASSWORD in .env}
+    volumes:
+      - central-db-data:/var/lib/postgresql/data
+      - ./docker/central-db/01-roles.sh:/docker-entrypoint-initdb.d/01-roles.sh:ro
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crm_owner -d omni_control"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  tenant-pg:
+    image: postgres:16-alpine
+    command: ["postgres", "-c", "max_connections=300"]
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: tenant_admin
+      POSTGRES_PASSWORD: ${TENANT_DB_PG_ADMIN_PASSWORD:?set TENANT_DB_PG_ADMIN_PASSWORD in .env}
+    volumes:
+      - tenant-pg-data:/var/lib/postgresql/data
+    ports:
+      - "55433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tenant_admin -d postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  tenant-mysql:
+    image: mysql:8.4
+    command: ["mysqld", "--max-connections=500"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${TENANT_DB_MYSQL_ADMIN_PASSWORD:?set TENANT_DB_MYSQL_ADMIN_PASSWORD in .env}
+    volumes:
+      - tenant-mysql-data:/var/lib/mysql
+    ports:
+      - "53306:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
+  app:
+    build: .
+    env_file: .env
+    environment:
+      # Container-internal addresses override the localhost values used by `cargo run`.
+      APP_BIND_ADDR: 0.0.0.0:3000
+      DATABASE_URL: postgres://crm_app:${CRM_APP_PASSWORD}@central-db:5432/omni_control
+      MIGRATION_DATABASE_URL: postgres://crm_owner:${POSTGRES_OWNER_PASSWORD}@central-db:5432/omni_control
+      TENANT_DB_TARGETS_FILE: /app/config/tenant-db-targets.toml
+      DATA_DIR: /app/data
+      LOG_FORMAT: json
+    volumes:
+      - app-data:/app/data
+    ports:
+      - "3000:3000"
+    depends_on:
+      central-db:
+        condition: service_healthy
+      tenant-pg:
+        condition: service_healthy
+      tenant-mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  central-db-data:
+  tenant-pg-data:
+  tenant-mysql-data:
+  app-data:

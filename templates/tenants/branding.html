@@ -1,0 +1,100 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+{% include "tenants/_tabs.html" %}
+{% if let Some(e) = general_error.as_ref() %}<div class="flash flash-error" role="alert">{{ e }}</div>{% endif %}
+<div class="grid2 wide-left">
+<section class="card">
+  <h2>White-label branding</h2>
+  <form method="post" action="{{ nav.base }}/branding" class="form" hx-post="/branding/preview" hx-trigger="input from:.color-input delay:250ms" hx-target="#preview" hx-swap="innerHTML" hx-include=".color-input">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <div class="two-col">
+      <div>
+        <label for="primary_color">Primary colour</label>
+        <input id="primary_color" class="color-input" name="primary_color" value="{{ form.primary_color }}" pattern="#[0-9A-Fa-f]{6}" maxlength="7" aria-describedby="pc-err">
+        <span id="pc-err" class="field-error">{{ self.err("primary_color") }}</span>
+      </div>
+      <div>
+        <label for="secondary_color">Secondary colour</label>
+        <input id="secondary_color" class="color-input" name="secondary_color" value="{{ form.secondary_color }}" pattern="#[0-9A-Fa-f]{6}" maxlength="7" aria-describedby="sc-err">
+        <span id="sc-err" class="field-error">{{ self.err("secondary_color") }}</span>
+      </div>
+    </div>
+    <label for="custom_domain">Custom portal domain</label>
+    <input id="custom_domain" name="custom_domain" value="{{ form.custom_domain }}" maxlength="253" placeholder="care.acme.com" aria-describedby="cd-help cd-err">
+    <span id="cd-help" class="help">Served only after DNS verification (BR-M01-005).</span>
+    <span id="cd-err" class="field-error">{{ self.err("custom_domain") }}</span>
+    <label class="check"><input type="checkbox" name="custom_domain_active" value="true" {% if form.custom_domain_active.is_some() %}checked{% endif %}> Serve the portal on the custom domain (requires a verified domain)</label>
+    <label for="email_from">Email sender</label>
+    <input id="email_from" name="email_from" type="email" value="{{ form.email_from }}" maxlength="320" placeholder="care@acme.com" aria-describedby="ef-help ef-err">
+    <span id="ef-help" class="help">The sender domain must be SPF/DKIM verified below (DOMAIN_NOT_VERIFIED otherwise).</span>
+    <span id="ef-err" class="field-error">{{ self.err("email_from") }}</span>
+    <label for="email_footer">Email footer</label>
+    <textarea id="email_footer" name="email_footer" maxlength="1000" rows="2">{{ form.email_footer }}</textarea>
+    <label for="login_message">Login page message</label>
+    <input id="login_message" name="login_message" value="{{ form.login_message }}" maxlength="500">
+    <label for="pdf_letterhead">PDF letterhead text</label>
+    <input id="pdf_letterhead" name="pdf_letterhead" value="{{ form.pdf_letterhead }}" maxlength="500">
+    {% if v.logo_url.is_some() %}<label class="check"><input type="checkbox" name="remove_logo" value="true"> Remove current logo</label>{% endif %}
+    {% if nav.writable %}<button class="btn btn-primary" type="submit" data-disable-on-submit>Save branding</button>{% endif %}
+  </form>
+</section>
+<section class="card">
+  <h2>Live preview</h2>
+  <div id="preview" aria-live="polite">
+    <div class="preview" style="--p: {{ v.branding.primary_color }}; --s: {{ v.branding.secondary_color }}">
+      <div class="preview-bar">{% if let Some(l) = v.logo_url.as_ref() %}<img src="{{ l }}" alt="Current logo" class="logo-sm">{% endif %}<span>{{ nav.name }}</span></div>
+      <div class="preview-body"><button type="button" class="preview-btn">Primary action</button> <span class="preview-accent">Accent</span></div>
+    </div>
+  </div>
+  <h3>Logo</h3>
+  {% if let Some(l) = v.logo_url.as_ref() %}<p><img src="{{ l }}" alt="Tenant logo" class="logo"></p>{% else %}<p class="empty">No logo uploaded.</p>{% endif %}
+  {% if nav.writable %}
+  <form method="post" action="{{ nav.base }}/branding/logo" enctype="multipart/form-data" class="form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <label for="logo">Upload logo (PNG or SVG, max 2 MB)</label>
+    <input id="logo" name="logo" type="file" accept="image/png,image/svg+xml" required>
+    <button class="btn" type="submit">Upload</button>
+  </form>
+  {% endif %}
+</section>
+</div>
+<div class="grid2">
+<section class="card">
+  <h2>Custom domain verification <span class="tag">simulated DNS</span></h2>
+  {% if let Some(d) = v.branding.custom_domain.as_ref() %}
+    <p><code>{{ d }}</code> — <span class="badge {{ page.badge(v.verification_status.custom_domain_status) }}">{{ v.verification_status.custom_domain_status }}</span>
+      {% if v.branding.custom_domain_active %}<span class="badge badge-ok">serving</span>{% else %}<span class="badge badge-muted">not served</span>{% endif %}</p>
+    <p class="help">Publish these records, then press Verify (FD-010):</p>
+    <table class="compact"><thead><tr><th>Type</th><th>Name</th><th>Value</th></tr></thead><tbody>
+      {% for r in v.dns_records %}<tr><td>{{ r.record_type }}</td><td><code>{{ r.name }}</code></td><td><code>{{ r.value }}</code></td></tr>{% endfor %}
+    </tbody></table>
+    {% if let Some(m) = v.branding.custom_domain_message.as_ref() %}<p class="small muted">{{ m }}</p>{% endif %}
+    {% if nav.writable %}<form method="post" action="{{ nav.base }}/branding/verify"><input type="hidden" name="_csrf" value="{{ page.csrf }}"><button class="btn" type="submit">Verify DNS</button></form>{% endif %}
+    <p class="help">The local simulator verifies domains ending in <code>.verified.test</code> (configurable); managed TLS issuance is not implemented.</p>
+  {% else %}<p class="empty">No custom domain configured.</p>{% endif %}
+</section>
+<section class="card">
+  <h2>Sender domains (SPF/DKIM) <span class="tag">simulated</span></h2>
+  <p>Email sender: {% if let Some(e) = v.branding.email_from.as_ref() %}<code>{{ e }}</code> <span class="badge {{ page.badge(v.verification_status.email_from_status) }}">{{ v.verification_status.email_from_status }}</span>{% else %}<span class="muted">not set</span>{% endif %}</p>
+  {% if v.sender_domains.is_empty() %}<p class="empty">No sender domains registered.</p>{% else %}
+  <ul class="list">
+    {% for d in v.sender_domains %}
+    <li><code>{{ d.domain }}</code> <span class="badge {{ page.badge(d.status.as_str()) }}">{{ d.status }}</span>
+      <br><span class="small">SPF: <code>{{ d.spf_record }}</code></span><br><span class="small">DKIM: <code>{{ d.dkim_record }}</code></span>
+      {% if nav.writable && d.status != "verified" %}
+      <form method="post" action="{{ nav.base }}/branding/senders/verify" class="inline"><input type="hidden" name="_csrf" value="{{ page.csrf }}"><input type="hidden" name="domain" value="{{ d.domain }}"><button class="btn btn-small" type="submit">Verify</button></form>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>{% endif %}
+  {% if nav.writable %}
+  <form method="post" action="{{ nav.base }}/branding/senders" class="form inline-form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <label for="sender-domain">Register sender domain</label>
+    <input id="sender-domain" name="domain" placeholder="acme.verified.test" maxlength="253" required>
+    <button class="btn" type="submit">Add</button>
+  </form>
+  {% endif %}
+</section>
+</div>
+{% endblock %}

@@ -1,0 +1,47 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+{% include "tenants/_tabs.html" %}
+<p class="help">Sandboxes (R017) are linked tenants with a copy of the production configuration. No production data is copied (M01 owns no business rows; future modules supply anonymised subsets through the anonymisation port).</p>
+{% if nav.is_sandbox %}
+<section class="card">
+  <h2>This tenant is a sandbox</h2>
+  <p>Production tenant: {% if let Some(p) = production.as_ref() %}<code>{{ p }}</code>{% else %}—{% endif %}. Promote its configuration from the production tenant's Sandboxes tab.</p>
+</section>
+{% else %}
+<section class="card">
+  <h2>Linked sandboxes</h2>
+  {% if sandboxes.is_empty() %}<p class="empty">No sandbox yet.</p>{% else %}
+  <div class="table-wrap"><table class="compact">
+    <thead><tr><th>Sandbox</th><th>Status</th><th>Created</th><th>Promote configuration to production</th></tr></thead>
+    <tbody>
+    {% for s in sandboxes %}
+    <tr>
+      <td>{% if nav.is_sa %}<a href="/admin/tenants/{{ s.id }}">{{ s.name }}</a>{% else %}{{ s.name }}{% endif %}<br><code class="small">{{ s.code }}</code></td>
+      <td><span class="badge {{ page.badge(s.status.as_str()) }}">{{ s.status.as_str() }}</span></td>
+      <td>{{ page.dt(s.created_at) }}</td>
+      <td>
+        <form method="post" action="{{ nav.base }}/sandboxes/{{ s.id }}/promote" class="inline-form">
+          <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+          <label for="cr-{{ s.id }}" class="sr-only">Change record</label>
+          <input id="cr-{{ s.id }}" name="change_record" placeholder="Change record, e.g. CHG-1042" maxlength="200">
+          <button class="btn btn-small" type="submit" name="action" value="preview">Preview diff</button>
+          <button class="btn btn-small btn-primary" type="submit" name="action" value="apply" data-confirm="Apply the sandbox configuration to production?">Promote</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
+  {% if nav.writable %}
+  <form method="post" action="{{ nav.base }}/sandboxes" class="form"><input type="hidden" name="_csrf" value="{{ page.csrf }}"><button class="btn btn-primary" type="submit" data-disable-on-submit>Create sandbox</button></form>
+  {% endif %}
+</section>
+{% endif %}
+{% if let Some(p) = preview.as_ref() %}
+<section class="card highlight">
+  <h2>Promotion diff ({{ p.diff.len() }} change(s))</h2>
+  {% include "tenants/_diff.html" %}
+</section>
+{% endif %}
+{% endblock %}

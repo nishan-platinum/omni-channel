@@ -1,0 +1,30 @@
+{% if rows.is_empty() %}
+<div class="empty">No tenants match. Use <a href="/admin/tenants/new">New tenant</a> to create the first one.</div>
+{% else %}
+<div class="table-wrap"><table>
+  <thead><tr>
+    <th>Tenant</th><th>Tier / plan</th><th>Status</th><th>Region</th><th>Storage</th><th>Version</th>
+    <th title="Error rate over the last hour">Errors 1h</th><th title="Undelivered domain events">Queue</th><th title="Highest quota utilisation">Quota</th><th>Tenant DB</th>
+  </tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td><a href="/admin/tenants/{{ r.tenant.id }}"><strong>{{ r.tenant.name }}</strong></a><br><code class="small">{{ r.tenant.code }}</code>{% if r.tenant.is_sandbox %} <span class="tag">sandbox</span>{% endif %}</td>
+      <td>{{ r.tenant.tier }}<br><span class="muted small">{{ r.tenant.plan_code }}</span></td>
+      <td><span class="badge {{ page.badge(r.tenant.status.as_str()) }}">{{ r.tenant.status.as_str() }}</span>
+          {% if r.tenant.provisioning_status.as_str() == "failed" %}<br><span class="badge badge-bad">provisioning failed</span>{% endif %}</td>
+      <td>{{ r.tenant.region }}</td>
+      <td class="small">{{ r.tenant.storage_strategy }}</td>
+      <td>{{ r.tenant.platform_version }}</td>
+      <td>{{ r.health.error_rate_pct }}%<br><span class="muted small">{{ r.health.requests_last_hour }} req</span></td>
+      <td>{{ r.health.queue_depth }}</td>
+      <td>{{ r.health.max_quota_pct }}%</td>
+      <td>{% if r.health.db_ok == Some(true) %}<span class="badge badge-ok">ok</span>{% else if r.health.db_ok == Some(false) %}<span class="badge badge-bad">down</span>{% else %}<span class="muted">not checked</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% if let Some(c) = next_cursor.as_ref() %}
+<p><a class="btn" href="/admin/tenants?q={{ q|urlencode }}&status={{ status|urlencode }}&region={{ region|urlencode }}&cursor={{ c|urlencode }}">Load more</a></p>
+{% endif %}
+{% endif %}

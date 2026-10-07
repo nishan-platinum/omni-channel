@@ -1,0 +1,26 @@
+# Server-side catalogue of dedicated tenant database targets (Regulated tier, ADR-0004).
+# Used by `cargo run` and `cargo test` against the Docker-hosted databases.
+# Secrets are references to environment variables (TENANT_DB_*),
+# never literal passwords. The Super Admin selects a target by name; HTTP input never carries
+# connection details.
+
+[[targets]]
+name = "dedicated-pg-my-central"
+engine = "postgres"
+region = "my-central"
+host = "127.0.0.1"
+port = 55433
+admin_database = "postgres"
+admin_user = "tenant_admin"
+admin_secret_ref = "env:TENANT_DB_PG_ADMIN_PASSWORD"
+runtime_seed_ref = "env:TENANT_DB_RUNTIME_SEED"
+
+[[targets]]
+name = "dedicated-mysql-my-central"
+engine = "mysql"
+region = "my-central"
+host = "127.0.0.1"
+port = 53306
+admin_user = "root"
+admin_secret_ref = "env:TENANT_DB_MYSQL_ADMIN_PASSWORD"
+runtime_seed_ref = "env:TENANT_DB_RUNTIME_SEED"

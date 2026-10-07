@@ -1,0 +1,16 @@
+<div class="tenant-head">
+  <div>
+    <p class="crumb">{% if nav.is_sa %}<a href="/admin/tenants">Tenants</a> / {% endif %}<code>{{ nav.code }}</code>{% if nav.is_sandbox %} <span class="tag">sandbox</span>{% endif %}</p>
+    <h1>{{ nav.name }}</h1>
+  </div>
+  <div class="status-block">
+    <span class="badge {{ page.badge(nav.status.as_str()) }}" title="Lifecycle status">{{ nav.status }}</span>
+    <span class="muted small">R014 view: {{ nav.status_term }}</span>
+  </div>
+</div>
+<nav class="tabs" aria-label="Tenant sections">
+  {% for (key, label, href) in nav.tabs() %}
+  <a href="{{ href }}" {% if key == nav.active %}aria-current="page"{% endif %}>{{ label }}</a>
+  {% endfor %}
+</nav>
+{% if !nav.writable %}<div class="banner banner-warn" role="note">Tenant status <strong>{{ nav.status }}</strong>: configuration is read-only.</div>{% endif %}

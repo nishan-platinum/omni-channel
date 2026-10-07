@@ -1,0 +1,10 @@
+# Confidential specification — never commit (AGENTS.md §1)
+docs/specification/*.pdf
+docs/specification/
+# Local environment and runtime data
+.env
+data/
+/target
+*.log
+# Benchmark output
+bench-results/

@@ -1,0 +1,17 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<h1>Backup &amp; DR report <span class="tag">reference</span></h1>
+<p class="help">Per-tenant recovery position against NFR-007 (RPO ≤ 15 min, RTO ≤ 4 h) based on M01 configuration snapshots (R011). Production RPO/RTO depends on database backup infrastructure, which is not part of this prototype.</p>
+{% if rows.is_empty() %}<p class="empty">No active tenants.</p>{% else %}
+<table class="compact"><thead><tr><th>Tenant</th><th>Tier</th><th>Last backup</th><th>RPO now</th><th>Last restore</th></tr></thead><tbody>
+{% for r in rows %}
+<tr>
+  <td><a href="/admin/tenants/{{ r.row.tenant_id }}/backups">{{ r.row.tenant_code }}</a></td>
+  <td>{{ r.row.tier }}</td>
+  <td>{{ page.odt(r.row.last_backup_at) }}</td>
+  <td>{% if let Some(m) = r.rpo_minutes %}{{ m }} min {% if r.rpo_met %}<span class="badge badge-ok">≤ 15</span>{% else %}<span class="badge badge-warn">&gt; 15</span>{% endif %}{% else %}<span class="badge badge-bad">no backup</span>{% endif %}</td>
+  <td>{% if let Some(ms) = r.row.last_restore_ms %}{{ ms }} ms {% if r.rto_met == Some(true) %}<span class="badge badge-ok">RTO met</span>{% endif %}{% else %}—{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody></table>{% endif %}
+{% endblock %}

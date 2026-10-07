@@ -1,0 +1,61 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+{% include "tenants/_tabs.html" %}
+<section class="card">
+  <h2>Quotas &amp; guardrails</h2>
+  <p class="help">Warnings are raised at the soft threshold (default 80%, NT-002); actions above 100% are blocked with HTTP 429 (BR-M01-004, NT-003). Monthly counters reset each cycle; users, numbers, channels and storage are current-state counts.</p>
+  <form method="post" action="{{ nav.base }}/quotas/limits" class="form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <div class="table-wrap"><table>
+      <thead><tr><th>Metric</th><th>Period</th><th>Usage</th><th>Limit</th><th>Soft threshold</th><th>Utilisation</th></tr></thead>
+      <tbody>
+      {% for l in q.lines %}
+        <tr>
+          <th scope="row">{{ l.label }}<br><code class="small">{{ l.metric.as_str() }}</code></th>
+          <td>{{ l.period }}</td>
+          <td>{{ l.usage }}</td>
+          <td>{% if nav.is_sa && nav.writable %}<input aria-label="Limit for {{ l.label }}" name="limit:{{ l.metric.as_str() }}" value="{{ l.limit }}" inputmode="numeric" class="num">{% else %}{{ l.limit }}{% endif %}</td>
+          <td>{% if nav.is_sa && nav.writable %}<input aria-label="Soft threshold for {{ l.label }}" name="threshold:{{ l.metric.as_str() }}" value="{{ l.soft_threshold }}" class="num">{% else %}{{ l.soft_threshold }}{% endif %}</td>
+          <td><meter min="0" max="100" low="80" high="99" optimum="10" value="{{ l.utilisation_pct }}">{{ l.utilisation_pct }}%</meter> {{ l.utilisation_pct }}% <span class="badge {{ page.badge(l.level.as_str()) }}">{{ l.level.as_str() }}</span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% if nav.is_sa && nav.writable %}<button class="btn btn-primary" type="submit">Save limits</button> <span class="help">Host-configurable per tenant/tier (R012). Limits are seeded from the plan.</span>{% endif %}
+  </form>
+</section>
+<div class="grid2">
+  <section class="card">
+    <h2>Try a quota-bound action</h2>
+    <p class="help">Simulates an action guarded by <code>QuotaService::check_and_consume</code> (what M03/M04/M05/M02 will call).</p>
+    <form method="post" action="{{ nav.base }}/quotas/consume" class="form inline-form">
+      <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+      <label for="c-metric">Metric</label>
+      <select id="c-metric" name="metric">{% for l in q.lines %}{% if l.metric.as_str() != "api_requests_per_minute" %}<option value="{{ l.metric.as_str() }}">{{ l.label }}</option>{% endif %}{% endfor %}</select>
+      <label for="c-amount">Amount</label>
+      <input id="c-amount" name="amount" value="1" inputmode="numeric" class="num">
+      <button class="btn" type="submit" {% if !nav.writable %}disabled{% endif %}>Consume</button>
+    </form>
+    {% if nav.is_sa %}
+    <h3>Reference metering feed <span class="tag">reference M21</span></h3>
+    <form method="post" action="{{ nav.base }}/quotas/metering" class="form inline-form">
+      <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+      <label for="m-meter">Meter</label>
+      <select id="m-meter" name="meter">{% for m in meters %}<option value="{{ m }}">{{ m }}</option>{% endfor %}</select>
+      <label for="m-amount">Amount</label>
+      <input id="m-amount" name="amount" value="1000" inputmode="numeric" class="num">
+      <button class="btn" type="submit">Record usage</button>
+    </form>
+    {% endif %}
+  </section>
+  <section class="card">
+    <h2>Usage statement {{ month }}</h2>
+    <form method="get" action="{{ nav.base }}/quotas" class="inline-form"><label for="month">Month</label><input id="month" name="month" type="month" value="{{ month }}"><button class="btn" type="submit">Show</button></form>
+    {% if statement.is_empty() %}<p class="empty">No metered usage for this month yet.</p>{% else %}
+    <table class="compact"><thead><tr><th>Meter</th><th>Value</th></tr></thead><tbody>
+    {% for (m, v) in statement %}<tr><td>{{ m }}</td><td>{{ v }}</td></tr>{% endfor %}
+    </tbody></table>{% endif %}
+    <p><a class="btn" href="{{ nav.base }}/quotas/statement.csv?month={{ month }}">Export CSV</a></p>
+  </section>
+</div>
+{% endblock %}

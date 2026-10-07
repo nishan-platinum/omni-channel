@@ -1,0 +1,14 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+{% include "tenants/_tabs.html" %}
+<section class="card">
+  <h2>Per-tenant backup &amp; restore <span class="tag">reference</span></h2>
+  <p class="help">Reference implementation of R011: snapshots this tenant's M01 configuration (encrypted with its data key) and restores it for this tenant only. Database point-in-time recovery is platform infrastructure and is not simulated here. RPO/RTO are reported on the <a href="/admin/dr">DR page</a>.</p>
+  <form method="post" action="{{ nav.base }}/backups" class="form"><input type="hidden" name="_csrf" value="{{ page.csrf }}"><button class="btn btn-primary" type="submit">Create backup now</button></form>
+  {% if backups.is_empty() %}<p class="empty">No backups yet.</p>{% else %}
+  <table class="compact"><thead><tr><th>Created</th><th>Size</th><th>Key</th><th>SHA-256</th><th></th></tr></thead><tbody>
+  {% for b in backups %}<tr><td class="nowrap">{{ page.dt(b.created_at) }}</td><td>{{ b.size_bytes }} B</td><td>v{{ b.key_version }}</td><td><code class="small">{{ b.sha256 }}</code></td>
+    <td>{% if nav.writable %}<form method="post" action="{{ nav.base }}/backups/{{ b.id }}/restore" class="inline" data-confirm="Restore this tenant's configuration from the backup of {{ page.dt(b.created_at) }}?"><input type="hidden" name="_csrf" value="{{ page.csrf }}"><button class="btn btn-small" type="submit">Restore</button></form>{% endif %}</td></tr>{% endfor %}
+  </tbody></table>{% endif %}
+</section>
+{% endblock %}

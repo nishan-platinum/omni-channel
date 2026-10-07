@@ -1,0 +1,15 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<h1>Entitlement matrix</h1>
+<p class="help">Per tenant: ● enabled, ○ entitled but off, · not in plan (R015/R023).</p>
+<div class="table-wrap"><table class="matrix">
+  <thead><tr><th>Tenant</th>{% for f in m.features %}<th><span class="vertical" title="{{ f }}">{{ f }}</span></th>{% endfor %}</tr></thead>
+  <tbody>
+  {% for (t, cells) in m.rows %}
+    <tr><th scope="row"><a href="/admin/tenants/{{ t.id }}/config">{{ t.code }}</a> <span class="badge {{ page.badge(t.status.as_str()) }}">{{ t.status.as_str() }}</span></th>
+    {% for c in cells %}<td class="cell-{{ c }}">{% if *c == 2 %}●{% else if *c == 1 %}○{% else %}·{% endif %}</td>{% endfor %}</tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% if let Some(c) = m.next_cursor.as_ref() %}<p><a class="btn" href="/admin/entitlements?cursor={{ c|urlencode }}">Next page</a></p>{% endif %}
+{% endblock %}

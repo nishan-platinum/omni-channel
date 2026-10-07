@@ -1,0 +1,4 @@
+{% if p.diff.is_empty() %}<p class="empty">No differences — applying would change nothing.</p>{% else %}
+<table class="compact diff"><thead><tr><th>Section</th><th>Key</th><th>Change</th><th>Before</th><th>After</th></tr></thead><tbody>
+{% for d in p.diff %}<tr class="diff-{{ d.kind.as_str() }}"><td>{{ d.section }}</td><td><code>{{ d.key }}</code></td><td>{{ d.kind.as_str() }}</td><td>{{ d.before.as_deref().unwrap_or("—") }}</td><td>{{ d.after.as_deref().unwrap_or("—") }}</td></tr>{% endfor %}
+</tbody></table>{% endif %}

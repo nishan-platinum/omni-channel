@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "allowScriptTags": false}'>
+  <title>{{ page.title }} · Omni Channel CRM · M01</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  {% if page.theme %}<link rel="stylesheet" href="/theme.css">{% endif %}
+  <script src="/static/js/htmx.min.js" defer></script>
+  <script src="/static/js/app.js" defer></script>
+</head>
+<body hx-headers='{"X-CSRF-Token": "{{ page.csrf }}"}'>
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">◆</span>
+      <span class="brand-name">TM CPaaS Omni Channel CRM</span>
+      <span class="brand-module">M01 · Tenant Management</span>
+    </div>
+    {% if let Some(u) = page.user.as_ref() %}
+    <nav class="mainnav" aria-label="Main">
+      {% if u.is_super_admin %}
+        <a href="/admin" {% if page.nav == "dashboard" %}aria-current="page"{% endif %}>Dashboard</a>
+        <a href="/admin/tenants" {% if page.nav == "tenants" %}aria-current="page"{% endif %}>Tenants</a>
+        <a href="/admin/tenants/new">New tenant</a>
+        <a href="/admin/releases" {% if page.nav == "releases" %}aria-current="page"{% endif %}>Releases</a>
+        <a href="/admin/entitlements" {% if page.nav == "entitlements" %}aria-current="page"{% endif %}>Entitlements</a>
+        <a href="/admin/analytics" {% if page.nav == "analytics" %}aria-current="page"{% endif %}>Analytics</a>
+        <a href="/admin/dr" {% if page.nav == "dr" %}aria-current="page"{% endif %}>DR</a>
+        {% if page.dev_outbox %}<a href="/dev/outbox" class="dev" {% if page.nav == "outbox" %}aria-current="page"{% endif %}>Dev outbox</a>{% endif %}
+      {% else %}
+        <a href="/tenant" {% if page.nav == "tenants" %}aria-current="page"{% endif %}>My tenant</a>
+        <a href="/tenant/config">Configuration</a>
+        <a href="/tenant/quotas">Quotas</a>
+        <a href="/tenant/branding">Branding</a>
+        <a href="/tenant/support">Support access</a>
+      {% endif %}
+    </nav>
+    <div class="userbox">
+      <span class="who">{{ u.display_name }}<small>{{ u.role_label }}{% if let Some(code) = u.tenant_code.as_ref() %} · {{ code }}{% endif %}</small></span>
+      <form method="post" action="/logout" class="inline">
+        <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+        <button type="submit" class="btn btn-ghost">Sign out</button>
+      </form>
+    </div>
+    {% endif %}
+  </header>
+  {% if let Some(u) = page.user.as_ref() %}{% if u.read_only %}
+  <div class="banner banner-warn" role="alert">This tenant is in its grace period: it is <strong>read-only</strong>. Export your data from <a href="/tenant/offboarding">Offboarding &amp; export</a>.</div>
+  {% endif %}{% endif %}
+  <main id="main" tabindex="-1">
+    {% if let Some(f) = page.flash.as_ref() %}
+    <div class="flash flash-{{ f.kind }}" role="status" aria-live="polite">{{ f.message }}</div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="footer">
+    Rust · Axum · Askama · SQLx — M01 reference implementation. Integrations marked <span class="tag">reference</span> are local stand-ins, not production services.
+  </footer>
+</body>
+</html>

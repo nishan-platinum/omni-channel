@@ -1,0 +1,26 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<h1>Aggregated host analytics</h1>
+<p class="help">R027: anonymised aggregates over M01 metadata only — never tenant business rows. Regulated tenants that opted out are excluded before aggregation; cohorts smaller than 3 tenants are suppressed.</p>
+<section class="stats">
+  <div class="stat"><span class="stat-n">{{ a.participants }}</span><span class="stat-l">participating tenants</span></div>
+  <div class="stat"><span class="stat-n">{{ a.opted_out }}</span><span class="stat-l">opted out</span></div>
+  <div class="stat"><span class="stat-n">{% if let Some(n) = a.api_calls_this_month %}{{ n }}{% else %}suppressed{% endif %}</span><span class="stat-l">API calls this month</span></div>
+</section>
+<div class="grid3">
+  {% for (title, buckets) in self.groups() %}
+  <section class="card">
+    <h2>{{ title }}</h2>
+    {% if buckets.is_empty() %}<p class="empty">No data.</p>{% else %}
+    <table class="compact"><tbody>{% for b in buckets.iter() %}<tr><td>{{ b.label }}</td><td>{% if let Some(c) = b.count %}{{ c }}{% else %}<span class="muted">&lt; 3 (suppressed)</span>{% endif %}</td></tr>{% endfor %}</tbody></table>
+    {% endif %}
+  </section>
+  {% endfor %}
+</div>
+<section class="card">
+  <h2>Feature adoption (among tenants entitled to the feature)</h2>
+  <table class="compact"><thead><tr><th>Feature</th><th>Adoption</th></tr></thead><tbody>
+  {% for f in a.adoption %}<tr><td>{{ f.label }} <code class="small">{{ f.feature }}</code></td><td>{% if let Some(p) = f.adoption_pct %}{{ p }}%{% else %}<span class="muted">suppressed</span>{% endif %}</td></tr>{% endfor %}
+  </tbody></table>
+</section>
+{% endblock %}

@@ -1,0 +1,39 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+{% include "tenants/_tabs.html" %}
+<div class="grid2">
+<section class="card">
+  <h2>Offboarding exports</h2>
+  <p class="help">A full M01 export (records, configuration baseline, audit log, data-plane rows, object manifest) is generated when the tenant enters grace and again at termination, encrypted with the tenant's data key (R016). {% if nav.is_sa %}Downloading an export as host requires an active support grant.{% endif %}</p>
+  {% if exports.is_empty() %}<p class="empty">No exports yet.</p>{% else %}
+  <table class="compact"><thead><tr><th>Created</th><th>Reason</th><th>Size</th><th>SHA-256</th><th></th></tr></thead><tbody>
+  {% for e in exports %}<tr><td class="nowrap">{{ page.dt(e.created_at) }}</td><td>{{ e.reason }}</td><td>{{ e.size_bytes }} B</td><td><code class="small">{{ e.sha256 }}</code></td>
+    <td><a class="btn btn-small" href="{{ nav.base }}/offboarding/exports/{{ e.id }}">Download (decrypted)</a></td></tr>{% endfor %}
+  </tbody></table>{% endif %}
+  {% if nav.status != "purged" %}
+  <form method="post" action="{{ nav.base }}/offboarding/export" class="form"><input type="hidden" name="_csrf" value="{{ page.csrf }}"><button class="btn" type="submit" data-disable-on-submit>Generate export now</button></form>
+  {% endif %}
+</section>
+<section class="card">
+  <h2>Retention &amp; purge</h2>
+  <dl class="kv">
+    <dt>Grace until</dt><dd>{{ page.odt(grace_until) }}</dd>
+    <dt>Purge permitted after</dt><dd>{{ page.odt(purge_after) }}</dd>
+    <dt>Legal hold</dt><dd>{% if legal_hold %}<span class="badge badge-warn">active — purge blocked</span>{% else %}none{% endif %}</dd>
+  </dl>
+  {% if nav.is_sa && nav.status != "purged" %}
+  <form method="post" action="{{ nav.base }}/legal-hold" class="form inline-form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <input type="hidden" name="hold" value="{% if legal_hold %}false{% else %}true{% endif %}">
+    <label for="lh-reason">Reason</label><input id="lh-reason" name="reason" maxlength="500">
+    <button class="btn" type="submit">{% if legal_hold %}Release legal hold{% else %}Place legal hold{% endif %}</button>
+  </form>
+  {% endif %}
+  {% if let Some(c) = certificate.as_ref() %}
+  <h3>Destruction certificate</h3>
+  <p>Issued {{ page.dt(c.issued_at) }} for <code>{{ c.tenant_code }}</code> · manifest SHA-256 <code class="small">{{ c.manifest_sha256 }}</code></p>
+  <pre class="wrap small">{{ c.manifest }}</pre>
+  {% endif %}
+</section>
+</div>
+{% endblock %}

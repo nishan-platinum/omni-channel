@@ -1,0 +1,41 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+{% include "tenants/_tabs.html" %}
+<div class="grid2">
+<section class="card">
+  <h2>Release ring &amp; maintenance window</h2>
+  <p class="help">Platform releases roll out ring by ring (host sandbox → early adopters → all). Disruptive changes are applied only inside this tenant's maintenance window (R026). Times are UTC.</p>
+  <form method="post" action="{{ nav.base }}/release" class="form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <label for="ring">Release ring</label>
+    {% if nav.is_sa %}
+    <select id="ring" name="ring">
+      <option value="host_sandbox" {% if pref.ring.as_str() == "host_sandbox" %}selected{% endif %}>Host sandbox</option>
+      <option value="early_adopter" {% if pref.ring.as_str() == "early_adopter" %}selected{% endif %}>Early adopters</option>
+      <option value="general" {% if pref.ring.as_str() == "general" %}selected{% endif %}>All tenants</option>
+    </select>
+    {% else %}
+    <p id="ring"><span class="tag">{{ pref.ring.label() }}</span> <span class="help">assigned by the platform operator</span></p>
+    {% endif %}
+    <label for="day">Maintenance day</label>
+    <select id="day" name="maintenance_day">{% for (n, name) in days %}<option value="{{ n }}" {% if *n == pref.maintenance_day %}selected{% endif %}>{{ name }}</option>{% endfor %}</select>
+    <label for="hour">Start hour (UTC, 0–23)</label>
+    <input id="hour" name="maintenance_start_hour_utc" value="{{ pref.maintenance_start_hour_utc }}" inputmode="numeric">
+    <label for="dur">Duration (minutes, 30–480)</label>
+    <input id="dur" name="maintenance_duration_min" value="{{ pref.maintenance_duration_min }}" inputmode="numeric">
+    {% if nav.writable %}<button class="btn btn-primary" type="submit">Save</button>{% endif %}
+  </form>
+</section>
+<section class="card">
+  <h2>In-app release notes</h2>
+  {% if notes.is_empty() %}<p class="empty">No releases have been scheduled for this tenant yet.</p>{% else %}
+  {% for n in notes %}
+  <article class="note">
+    <h3>{{ n.release_version }} — {{ n.title }} {% if n.disruptive %}<span class="tag">disruptive</span>{% endif %}</h3>
+    <p class="small muted">Ring {{ n.ring.label() }} · scheduled {{ page.dt(n.scheduled_for) }} · <span class="badge {{ page.badge(n.status.as_str()) }}">{{ n.status }}</span>{% if let Some(c) = n.completed_at %} · applied {{ page.dt(c) }}{% endif %}</p>
+    <p>{{ n.notes }}</p>
+  </article>
+  {% endfor %}{% endif %}
+</section>
+</div>
+{% endblock %}

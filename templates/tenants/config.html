@@ -1,0 +1,48 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+{% include "tenants/_tabs.html" %}
+{% if let Some(e) = general_error.as_ref() %}<div class="flash flash-error" role="alert">{{ e }}</div>{% endif %}
+<div class="grid2 wide-left">
+<section class="card">
+  <h2>Configuration</h2>
+  <p class="help">Typed, namespaced settings validated against the key schema. Values marked with an enforcing module other than M01 are stored here and enforced by that module once it exists.</p>
+  <form method="post" action="{{ nav.base }}/config" class="form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <table class="config">
+      <thead><tr><th scope="col">Setting</th><th scope="col">Value</th><th scope="col">Enforced by</th></tr></thead>
+      <tbody>
+      {% for e in v.entries %}
+      <tr>
+        <th scope="row"><label for="cfg-{{ e.key }}">{{ e.label }}</label><br><code class="small">{{ e.key }}</code><br><span class="help">{{ e.help }}</span></th>
+        <td>
+          {% if e.kind == "bool" %}
+            {% if e.editable %}<input type="hidden" name="cfg:{{ e.key }}" value="false">{% endif %}
+            <input id="cfg-{{ e.key }}" type="checkbox" name="cfg:{{ e.key }}" value="true" {% if e.checked %}checked{% endif %} {% if !e.editable %}disabled{% endif %}>
+          {% else if e.kind == "enum" %}
+            <select id="cfg-{{ e.key }}" name="cfg:{{ e.key }}" {% if !e.editable %}disabled{% endif %}>
+              {% for o in e.options %}<option value="{{ o }}" {% if e.display == *o %}selected{% endif %}>{{ o }}</option>{% endfor %}
+            </select>
+          {% else %}
+            <input id="cfg-{{ e.key }}" name="cfg:{{ e.key }}" value="{{ e.display }}" {% if !e.editable %}disabled{% endif %} {% if e.kind == "int" %}inputmode="numeric"{% endif %}>
+          {% endif %}
+          <span class="field-error">{{ self.err(e.key) }}</span>
+        </td>
+        <td class="small">{{ e.enforced_by }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% if nav.writable %}<button class="btn btn-primary" type="submit" data-disable-on-submit>Save configuration</button>{% endif %}
+  </form>
+</section>
+<section class="card">
+  <h2>Features &amp; module entitlements</h2>
+  <p class="help">Plan <strong>{{ v.plan.name }}</strong>. Features outside the plan are greyed out and cannot be enabled (BR-M01-003). Toggling updates instantly.</p>
+  <ul class="features" id="features">
+  {% for f in v.features %}
+    {% include "tenants/_feature_row_inner.html" %}
+  {% endfor %}
+  </ul>
+</section>
+</div>
+{% endblock %}

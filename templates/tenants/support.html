@@ -1,0 +1,69 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+{% include "tenants/_tabs.html" %}
+<p class="help">Break-glass support access (R024): the platform operator cannot read tenant data without a time-boxed grant approved by a Tenant Admin (default 4 hours). {% if regulated %}<strong>Regulated tenant:</strong> every grant needs an incident reference and a named approver.{% endif %} Every request, decision and use is audited as a security event.</p>
+{% if let Some(sv) = view.as_ref() %}
+<section class="card highlight">
+  <h2>Support view (grant {{ sv.grant.id }}) — expires {{ page.odt(sv.grant.expires_at) }}</h2>
+  <p class="help">Tenant data-plane rows read under an explicit tenant context opened by the active grant. This access was audited.</p>
+  {% if sv.rows.is_empty() %}<p class="empty">No data-plane rows.</p>{% else %}
+  <table class="compact"><thead><tr><th>Row id</th><th>Tenant id</th><th>Marker</th></tr></thead><tbody>
+    {% for r in sv.rows %}<tr><td><code>{{ r.id }}</code></td><td><code>{{ r.tenant_id }}</code></td><td>{{ r.marker }}</td></tr>{% endfor %}
+  </tbody></table>{% endif %}
+</section>
+{% endif %}
+<div class="grid2">
+<section class="card">
+  <h2>Grants</h2>
+  {% if grants.is_empty() %}<p class="empty">No support grants have been requested.</p>{% else %}
+  <div class="table-wrap"><table class="compact">
+    <thead><tr><th>Requested</th><th>Reason / incident</th><th>Window</th><th>State</th><th>Uses</th><th></th></tr></thead>
+    <tbody>
+    {% for (g, st) in grants %}
+      <tr>
+        <td class="nowrap">{{ page.dt(g.created_at) }}</td>
+        <td>{{ g.reason }}{% if let Some(i) = g.incident_ref.as_ref() %}<br><code class="small">{{ i }}</code>{% endif %}</td>
+        <td class="small">{{ g.duration_minutes }} min{% if g.expires_at.is_some() %}<br>until {{ page.odt(g.expires_at) }}{% endif %}</td>
+        <td><span class="badge {{ page.badge(st) }}">{{ st }}</span></td>
+        <td>{{ g.use_count }}</td>
+        <td>
+          {% if !nav.is_sa && *st == "pending approval" %}
+          <form method="post" action="/tenant/support/{{ g.id }}/approve" class="inline" data-confirm="Approve time-boxed support access ({{ g.duration_minutes }} minutes)?"><input type="hidden" name="_csrf" value="{{ page.csrf }}"><input type="hidden" name="note" value=""><button class="btn btn-small btn-primary" type="submit">Approve</button></form>
+          <form method="post" action="/tenant/support/{{ g.id }}/reject" class="inline"><input type="hidden" name="_csrf" value="{{ page.csrf }}"><input type="hidden" name="note" value=""><button class="btn btn-small" type="submit">Reject</button></form>
+          {% endif %}
+          {% if *st == "active" || *st == "pending approval" %}
+          <form method="post" action="{{ nav.base }}/support/{{ g.id }}/revoke" class="inline"><input type="hidden" name="_csrf" value="{{ page.csrf }}"><button class="btn btn-small btn-danger" type="submit">Revoke</button></form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
+</section>
+{% if nav.is_sa %}
+<section class="card">
+  <h2>Request access</h2>
+  <form method="post" action="{{ nav.base }}/support" class="form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <label for="g-reason">Reason *</label>
+    <input id="g-reason" name="reason" required minlength="5" maxlength="500" placeholder="Investigate failed webhook deliveries">
+    <label for="g-incident">Incident reference {% if regulated %}*{% endif %}</label>
+    <input id="g-incident" name="incident_ref" maxlength="100" {% if regulated %}required{% endif %} placeholder="INC-2026-0001">
+    <label for="g-duration">Duration (minutes, 15–480)</label>
+    <input id="g-duration" name="duration_minutes" value="240" inputmode="numeric">
+    <label for="g-approver">Named approver {% if regulated %}*{% endif %}</label>
+    <select id="g-approver" name="named_approver_id">
+      <option value="">— any Tenant Admin —</option>
+      {% for u in approvers %}<option value="{{ u.id }}">{{ u.display_name }} ({{ u.email }})</option>{% endfor %}
+    </select>
+    <button class="btn btn-primary" type="submit">Request grant</button>
+  </form>
+  <form method="post" action="{{ nav.base }}/support/open" class="form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <button class="btn" type="submit">Open support view (requires an active grant)</button>
+  </form>
+</section>
+{% endif %}
+</div>
+{% endblock %}

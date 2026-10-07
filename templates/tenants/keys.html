@@ -1,0 +1,28 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+{% include "tenants/_tabs.html" %}
+<section class="card">
+  <h2>Encryption keys <span class="tag">reference KMS</span></h2>
+  <p class="help">Per-tenant data keys (envelope encryption, R010) protect exports and backups. Rotation installs a new version without downtime; older versions stay available for decryption. Only wrapped keys are stored; the local reference KMS derives key-encryption keys from a master key held in the environment. {% if regulated %}This Regulated tenant may register a customer-supplied key (BYOK).{% endif %}</p>
+  <table class="compact"><thead><tr><th>Version</th><th>Kind</th><th>Key reference</th><th>State</th><th>Created</th><th>Rotate by (≤ 90 days)</th></tr></thead><tbody>
+  {% for k in keys %}
+    <tr><td>{{ k.key_version }}</td><td>{{ k.kind.as_str() }}</td><td><code class="small">{{ k.key_ref }}</code></td>
+      <td><span class="badge {{ page.badge(k.state.as_str()) }}">{{ k.state.as_str() }}</span></td>
+      <td>{{ page.dt(k.created_at) }}</td><td>{{ page.dt(k.rotate_after) }}{% if k.state.as_str() == "active" && k.rotate_after <= now %} <span class="badge badge-warn">due</span>{% endif %}</td></tr>
+  {% endfor %}
+  </tbody></table>
+  {% if nav.is_sa && nav.writable %}
+  <div class="row-actions">
+    <form method="post" action="{{ nav.base }}/keys/rotate" class="inline"><input type="hidden" name="_csrf" value="{{ page.csrf }}"><button class="btn btn-primary" type="submit">Rotate data key</button></form>
+  </div>
+  {% if regulated %}
+  <form method="post" action="{{ nav.base }}/keys/byok" class="form inline-form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <label for="key_ref">Customer key reference</label>
+    <input id="key_ref" name="key_ref" placeholder="byok:aws-kms/arn:aws:kms:ap-southeast-5:123:key/abcd" maxlength="205">
+    <button class="btn" type="submit">Register BYOK key</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</section>
+{% endblock %}

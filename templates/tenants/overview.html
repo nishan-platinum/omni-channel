@@ -1,0 +1,131 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+{% include "tenants/_tabs.html" %}
+{% if d.tenant.status.as_str() == "suspended" %}
+<div class="banner banner-bad" role="alert"><strong>Suspended:</strong> {{ d.tenant.suspended_reason.as_deref().unwrap_or("—") }}. New logins and API calls are blocked; data is retained.</div>
+{% endif %}
+<div class="grid2">
+  <section class="card">
+    <h2>Tenant record</h2>
+    <dl class="kv">
+      <dt>Tenant ID</dt><dd><code>{{ d.tenant.id }}</code></dd>
+      <dt>Tenant code</dt><dd><code>{{ d.tenant.code }}</code> <span class="muted small">(immutable)</span></dd>
+      <dt>Legal name</dt><dd>{{ d.tenant.legal_name.as_deref().unwrap_or("—") }}</dd>
+      <dt>Plan</dt><dd>{{ d.plan.name }} <span class="tag">{{ d.plan.tier.label() }}</span> <span class="tag">reference plan</span></dd>
+      <dt>Data region</dt><dd>{{ d.tenant.region.label() }} (<code>{{ d.tenant.region.as_str() }}</code>)</dd>
+      <dt>Isolation mode</dt><dd>{{ d.tenant.isolation_mode.as_str() }} · {{ d.tenant.storage_strategy.label() }}</dd>
+      <dt>Primary admin</dt><dd>{{ d.tenant.primary_admin_email }}</dd>
+      <dt>Platform version</dt><dd>{{ d.tenant.platform_version }}</dd>
+      <dt>Created</dt><dd>{{ page.dt(d.tenant.created_at) }}</dd>
+      <dt>Activated</dt><dd>{{ page.odt(d.tenant.activated_at) }}</dd>
+      {% if d.tenant.grace_until.is_some() %}<dt>Grace until</dt><dd>{{ page.odt(d.tenant.grace_until) }}</dd>{% endif %}
+      {% if d.tenant.terminated_at.is_some() %}<dt>Terminated</dt><dd>{{ page.odt(d.tenant.terminated_at) }}</dd><dt>Purge after</dt><dd>{{ page.odt(d.tenant.purge_after) }}</dd>{% endif %}
+      {% if d.tenant.legal_hold %}<dt>Legal hold</dt><dd><span class="badge badge-warn">active — purge blocked</span></dd>{% endif %}
+      {% if let Some(p) = d.parent.as_ref() %}<dt>Parent (reseller)</dt><dd>{% if nav.is_sa %}<a href="/admin/tenants/{{ p.id }}">{{ p.name }}</a>{% else %}{{ p.name }}{% endif %}</dd>{% endif %}
+      {% if let Some(p) = d.sandbox_of.as_ref() %}<dt>Sandbox of</dt><dd>{% if nav.is_sa %}<a href="/admin/tenants/{{ p.id }}">{{ p.name }}</a>{% else %}{{ p.name }}{% endif %}</dd>{% endif %}
+    </dl>
+    {% if nav.writable %}
+    <details class="editor">
+      <summary>Edit organisation details</summary>
+      <form method="post" action="{{ nav.base }}/details" class="form">
+        <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+        <label for="d-name">Organisation name</label>
+        <input id="d-name" name="name" required maxlength="120" value="{{ d.tenant.name }}">
+        <label for="d-legal">Legal name</label>
+        <input id="d-legal" name="legal_name" maxlength="200" value="{{ d.tenant.legal_name.as_deref().unwrap_or("") }}">
+        {% if nav.is_sa %}
+        <label for="d-parent">Parent tenant ID <span class="muted">(empty = none; max depth 3, no cycles)</span></label>
+        <input id="d-parent" name="parent_tenant_id" maxlength="36" value="{% if let Some(p) = d.tenant.parent_tenant_id.as_ref() %}{{ p }}{% endif %}">
+        {% endif %}
+        <button class="btn btn-primary" type="submit">Save</button>
+      </form>
+    </details>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Lifecycle</h2>
+    <p>Current status <span class="badge {{ page.badge(d.tenant.status.as_str()) }}">{{ d.tenant.status.label() }}</span>
+       <span class="muted small">(provisioning: {{ d.tenant.provisioning_status.as_str() }} · isolation test: {{ d.tenant.isolation_check_status.as_str() }})</span></p>
+    {% if nav.is_sa %}
+      {% if actions.is_empty() %}
+        <p class="muted">No further transitions are permitted from this state.</p>
+      {% else %}
+        <p class="help">Only transitions permitted by the M01 state machine are offered.</p>
+        {% for a in actions %}
+        <form method="post" action="{{ nav.base }}/status" class="transition" {% if a.destructive %}data-confirm="Confirm: {{ a.label }} for {{ nav.code }}? This affects every user of the tenant."{% endif %}>
+          <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+          <input type="hidden" name="status" value="{{ a.to }}">
+          {% if a.requires_reason %}
+          <label for="reason-{{ a.to }}">Reason (required)</label>
+          <input id="reason-{{ a.to }}" name="reason" required maxlength="500" placeholder="e.g. Non-payment of invoice INV-2026-0042">
+          {% else %}
+          <input type="hidden" name="reason" value="">
+          {% endif %}
+          <button type="submit" class="btn {% if a.destructive %}btn-danger{% else %}btn-primary{% endif %}" data-disable-on-submit>{{ a.label }}</button>
+        </form>
+        {% endfor %}
+      {% endif %}
+      {% if d.tenant.status.as_str() == "draft" %}
+      <div class="row-actions">
+        {% if d.tenant.provisioning_status.as_str() == "failed" %}
+        <form method="post" action="{{ nav.base }}/provisioning/retry" class="inline"><input type="hidden" name="_csrf" value="{{ page.csrf }}"><button class="btn" type="submit">Retry provisioning</button></form>
+        {% endif %}
+        <form method="post" action="{{ nav.base }}/discard" class="inline" data-confirm="Discard this draft? Its data store and invitation are removed (provisioning rollback)."><input type="hidden" name="_csrf" value="{{ page.csrf }}"><button class="btn btn-danger" type="submit">Discard draft</button></form>
+      </div>
+      {% endif %}
+    {% else %}
+      <p class="muted">Lifecycle changes are made by the platform operator.</p>
+    {% endif %}
+  </section>
+</div>
+
+<div class="grid2">
+  <section class="card">
+    <h2>Health</h2>
+    <dl class="kv">
+      <dt>Error rate (1h)</dt><dd>{{ d.health.error_rate_pct }}% of {{ d.health.requests_last_hour }} requests</dd>
+      <dt>Event queue depth</dt><dd>{{ d.health.queue_depth }}</dd>
+      <dt>Highest quota use</dt><dd>{{ d.health.max_quota_pct }}%</dd>
+      <dt>Tenant database</dt><dd>{% if d.health.db_ok == Some(true) %}<span class="badge badge-ok">reachable</span>{% else if d.health.db_ok == Some(false) %}<span class="badge badge-bad">unreachable</span>{% else %}<span class="muted">not checked yet</span>{% endif %}</dd>
+    </dl>
+    {% if !quota_lines.is_empty() %}
+    <h3>Quota utilisation</h3>
+    <ul class="meters">
+      {% for (label, pct, level) in quota_lines %}
+      <li><span>{{ label }}</span><meter min="0" max="100" low="80" high="99" optimum="10" value="{{ pct }}">{{ pct }}%</meter><span class="small">{{ pct }}% <span class="badge {{ page.badge(level.as_str()) }}">{{ level }}</span></span></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+  <section class="card">
+    <h2>Provisioning</h2>
+    {% if let Some(run) = d.run.as_ref() %}
+      <p>Last run <span class="badge {{ page.badge(run.status.as_str()) }}">{{ run.status }}</span>
+        {% if let Some(ms) = run.duration_ms %}in {{ ms }} ms <span class="muted small">(target ≤ 30 min, R013)</span>{% endif %}
+        {% if let Some(t) = run.template_code.as_ref() %} · template <code>{{ t }}</code>{% endif %}</p>
+      <ol class="steps">
+        {% for s in run.steps %}
+        <li><span class="badge {{ page.badge(s.status.as_str()) }}">{{ s.status }}</span> <code>{{ s.step }}</code><br><span class="small muted">{{ s.detail.as_deref().unwrap_or("") }}</span></li>
+        {% endfor %}
+      </ol>
+    {% else %}<p class="empty">No provisioning runs recorded.</p>{% endif %}
+    <h3>Tenant administrators</h3>
+    {% if admins.is_empty() %}<p class="empty">No active Tenant Admin yet — the invitation has not been accepted.</p>{% else %}
+    <ul class="list">{% for u in admins %}<li>{{ u.display_name }} — {{ u.email }}</li>{% endfor %}</ul>{% endif %}
+  </section>
+</div>
+
+{% if !notes.is_empty() %}
+<section class="card">
+  <h2>Release notes</h2>
+  {% for n in notes %}
+  <article class="note">
+    <h3>{{ n.release_version }} — {{ n.title }} {% if n.disruptive %}<span class="tag">disruptive</span>{% endif %} <span class="badge {{ page.badge(n.status.as_str()) }}">{{ n.status }}</span></h3>
+    <p class="small muted">Scheduled {{ page.dt(n.scheduled_for) }}{% if n.disruptive %} (your maintenance window){% endif %}</p>
+    <p>{{ n.notes }}</p>
+  </article>
+  {% endfor %}
+</section>
+{% endif %}
+{% endblock %}

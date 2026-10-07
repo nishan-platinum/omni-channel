@@ -1,0 +1,19 @@
+<li class="feature {% if !f.entitled %}upsell{% endif %}" id="{{ f.dom_id }}">
+  <div>
+    <strong>{{ f.label }}</strong> <span class="muted small">{{ f.category }} · {{ f.owner }}</span><br>
+    <code class="small">{{ f.key }}</code>
+    {% if let Some(r) = f.requirement %}<br><span class="help">Requires: {{ r }}</span>{% endif %}
+    {% if let Some(e) = error.as_ref() %}<br><span class="field-error" role="alert">{{ e }}</span>{% endif %}
+  </div>
+  <div>
+  {% if f.entitled %}
+    <form method="post" action="{{ base }}/features/{{ f.key }}" hx-post="{{ base }}/features/{{ f.key }}" hx-target="#{{ f.dom_id }}" hx-swap="outerHTML">
+      <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+      <input type="hidden" name="enabled" value="{% if f.enabled %}false{% else %}true{% endif %}">
+      <button type="submit" class="toggle {% if f.enabled %}on{% endif %}" aria-pressed="{% if f.enabled %}true{% else %}false{% endif %}" {% if !writable %}disabled{% endif %}>{% if f.enabled %}On{% else %}Off{% endif %}</button>
+    </form>
+  {% else %}
+    <span class="tag" title="Not included in the plan">Upgrade plan</span>
+  {% endif %}
+  </div>
+</li>

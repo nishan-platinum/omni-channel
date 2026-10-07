@@ -1,0 +1,24 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<h1>Development outbox <span class="tag">reference M25</span></h1>
+<p class="muted">Notifications captured by the local NotificationPort adapter. Available only when <code>APP_ENV=development</code> and only to the Super Admin. Invitation links appear here instead of being emailed.</p>
+{% if entries.is_empty() %}
+<div class="empty">No notifications yet. Create a tenant to generate an invitation.</div>
+{% else %}
+<div class="table-wrap"><table>
+  <thead><tr><th>When</th><th>ID</th><th>Template</th><th>To</th><th>Priority</th><th>Subject / body</th></tr></thead>
+  <tbody>
+  {% for e in entries %}
+    <tr>
+      <td class="nowrap">{{ page.dt(e.created_at) }}</td>
+      <td><code>{{ e.notification_id }}</code></td>
+      <td>{{ e.template_key }}</td>
+      <td>{{ e.recipient }}</td>
+      <td>{{ e.priority }}</td>
+      <td><strong>{{ e.subject }}</strong>{% if let Some(b) = e.body.as_ref() %}<pre class="wrap">{{ b }}</pre>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endif %}
+{% endblock %}

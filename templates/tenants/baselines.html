@@ -1,0 +1,59 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+{% include "tenants/_tabs.html" %}
+<p class="help">Configuration baselines (R022): export the current configuration, import one with a diff review, and roll back to an earlier baseline (UJ-15 E2). Imports require a change record reference (GOV-002) and archive the previous state first.</p>
+{% if let Some(e) = error.as_ref() %}<div class="flash flash-error" role="alert">{{ e }}</div>{% endif %}
+<div class="grid2">
+<section class="card">
+  <h2>Baselines</h2>
+  {% if nav.writable %}
+  <form method="post" action="{{ nav.base }}/baselines/export" class="inline-form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <label for="label">Label</label><input id="label" name="label" maxlength="200" placeholder="Go-live baseline">
+    <button class="btn btn-primary" type="submit">Export current configuration</button>
+  </form>
+  {% endif %}
+  {% if baselines.is_empty() %}<p class="empty">No baselines yet.</p>{% else %}
+  <table class="compact"><thead><tr><th>v</th><th>Label</th><th>Source</th><th>Created</th><th></th></tr></thead><tbody>
+  {% for b in baselines %}
+    <tr>
+      <td>{{ b.version_no }}</td>
+      <td>{{ b.label }}{% if let Some(cr) = b.change_record.as_ref() %}<br><span class="small muted">{{ cr }}</span>{% endif %}<br><code class="small" title="sha256">{{ b.sha256 }}</code></td>
+      <td>{{ b.source }}</td>
+      <td class="nowrap">{{ page.dt(b.created_at) }}</td>
+      <td>
+        <a class="btn btn-small" href="{{ nav.base }}/baselines/{{ b.id }}/download">Download</a>
+        {% if nav.writable %}
+        <form method="post" action="{{ nav.base }}/baselines/{{ b.id }}/rollback" class="inline" data-confirm="Roll back configuration to baseline v{{ b.version_no }}?">
+          <input type="hidden" name="_csrf" value="{{ page.csrf }}"><input type="hidden" name="change_record" value="rollback to v{{ b.version_no }}">
+          <button class="btn btn-small" type="submit">Roll back</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody></table>{% endif %}
+</section>
+<section class="card">
+  <h2>Import baseline</h2>
+  <form method="post" action="{{ nav.base }}/baselines/import" class="form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <label for="document">Baseline JSON</label>
+    <textarea id="document" name="document" rows="10" class="mono" placeholder="Paste a baseline exported from this or another tenant (e.g. a sandbox)">{{ document }}</textarea>
+    <label for="change_record">Change record *</label>
+    <input id="change_record" name="change_record" value="{{ change_record }}" maxlength="200" placeholder="CHG-2026-0042">
+    <div class="actions">
+      <button class="btn" type="submit" name="action" value="preview">Preview diff</button>
+      {% if nav.writable %}<button class="btn btn-primary" type="submit" name="action" value="apply" data-confirm="Apply this baseline? The current configuration is archived first.">Apply</button>{% endif %}
+    </div>
+  </form>
+  {% if let Some(p) = preview.as_ref() %}
+  <h3>Diff ({{ p.diff.len() }} change(s))</h3>
+  {% include "tenants/_diff.html" %}
+  {% endif %}
+</section>
+</div>
+{% if !current_json.is_empty() %}
+<details class="card"><summary>Latest baseline document</summary><pre class="wrap small">{{ current_json }}</pre></details>
+{% endif %}
+{% endblock %}

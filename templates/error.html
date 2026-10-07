@@ -1,0 +1,9 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<section class="card narrow">
+  <h1>{{ status }} · {{ code }}</h1>
+  <p>{{ message }}</p>
+  <p class="muted">Correlation id: <code>{{ correlation_id }}</code> — quote it when contacting support.</p>
+  <p><a class="btn" href="/">Back to start</a></p>
+</section>
+{% endblock %}

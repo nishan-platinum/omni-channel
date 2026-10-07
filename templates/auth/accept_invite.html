@@ -1,0 +1,18 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<section class="card narrow">
+  <h1>Set your password</h1>
+  <p>You were invited as Tenant Administrator of <strong>{{ tenant_name }}</strong> (organisation code <code>{{ tenant_code }}</code>).</p>
+  <p class="muted">Account: {{ email }}</p>
+  {% if let Some(e) = error.as_ref() %}<div class="flash flash-error" role="alert">{{ e }}</div>{% endif %}
+  <form method="post" action="/invitations/accept" class="form">
+    <input type="hidden" name="_csrf" value="{{ login_csrf }}">
+    <input type="hidden" name="token" value="{{ token }}">
+    <label for="password">New password <span class="muted">({{ min_length }}–128 characters)</span></label>
+    <input id="password" name="password" type="password" autocomplete="new-password" required minlength="{{ min_length }}" maxlength="128">
+    <label for="confirm">Confirm password</label>
+    <input id="confirm" name="confirm" type="password" autocomplete="new-password" required minlength="{{ min_length }}" maxlength="128">
+    <button type="submit" class="btn btn-primary">Set password</button>
+  </form>
+</section>
+{% endblock %}

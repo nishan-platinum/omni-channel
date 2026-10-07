@@ -1,0 +1,35 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<div class="page-head">
+  <h1>Host console</h1>
+  <a class="btn btn-primary" href="/admin/tenants/new">New tenant</a>
+</div>
+<section class="stats" aria-label="Tenants by status">
+  <div class="stat"><span class="stat-n">{{ total }}</span><span class="stat-l">tenants</span></div>
+  {% for (status, n) in counts %}
+  <a class="stat" href="/admin/tenants?status={{ status }}"><span class="stat-n">{{ n }}</span><span class="stat-l"><span class="badge {{ page.badge(status.as_str()) }}">{{ status }}</span></span></a>
+  {% endfor %}
+</section>
+<div class="grid2">
+  <section class="card">
+    <h2>Provisioning needing attention</h2>
+    {% if failed.is_empty() %}<p class="empty">No failed provisioning runs.</p>{% else %}
+    <ul class="list">{% for (id, code, at) in failed %}<li><a href="/admin/tenants/{{ id }}"><code>{{ code }}</code></a> — failed, {{ page.dt(*at) }}</li>{% endfor %}</ul>
+    {% endif %}
+  </section>
+  <section class="card">
+    <h2>Recent security events</h2>
+    <p class="muted small">Audit chain integrity (last 500 rows): {% if chain_ok %}<span class="badge badge-ok">verified</span>{% else %}<span class="badge badge-bad">BROKEN</span>{% endif %}</p>
+    {% if security_events.is_empty() %}<p class="empty">No security events recorded.</p>{% else %}
+    <div class="table-wrap"><table class="compact">
+      <thead><tr><th>When</th><th>Action</th><th>Tenant</th><th>Actor role</th></tr></thead>
+      <tbody>{% for e in security_events %}
+        <tr><td class="nowrap">{{ page.dt(e.created_at) }}</td><td><code>{{ e.action }}</code></td>
+            <td>{% if let Some(t) = e.tenant_id.as_ref() %}<a href="/admin/tenants/{{ t }}/audit">{{ t }}</a>{% else %}—{% endif %}</td>
+            <td>{{ e.actor_role }}</td></tr>
+      {% endfor %}</tbody>
+    </table></div>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  quality:
+    name: fmt + clippy + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --lib
+
+  integration:
+    name: PostgreSQL / MySQL / isolation tests
+    runs-on: ubuntu-latest
+    needs: quality
+    services:
+      central-db:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: omni_control
+          POSTGRES_USER: crm_owner
+          POSTGRES_PASSWORD: dev-owner-password-change-me
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U crm_owner -d omni_control" --health-interval 3s --health-timeout 3s --health-retries 30
+      tenant-pg:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: tenant_admin
+          POSTGRES_PASSWORD: dev-tenant-pg-admin-change-me
+        ports: ["55433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U tenant_admin -d postgres" --health-interval 3s --health-timeout 3s --health-retries 30
+      tenant-mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: dev-tenant-mysql-root-change-me
+        ports: ["53306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pdev-tenant-mysql-root-change-me --silent" --health-interval 5s --health-timeout 5s --health-retries 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          # Same runtime role the Docker init script creates (NOBYPASSRLS, not owner).
+          PGPASSWORD=dev-owner-password-change-me psql -h 127.0.0.1 -p 55432 -U crm_owner -d omni_control \
+            -c "CREATE ROLE crm_app LOGIN NOBYPASSRLS NOSUPERUSER PASSWORD 'dev-app-password-change-me'" \
+            -c "GRANT CONNECT ON DATABASE omni_control TO crm_app"
+      - name: Tenant isolation suite (release blocker)
+        run: cargo test --test isolation -- --test-threads=4
+      - name: PostgreSQL + MySQL adapter tests
+        run: cargo test --test postgres --test mysql -- --test-threads=4
+      - name: M01 application / API / UI tests
+        run: cargo test --test m01 -- --test-threads=4
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t omni-m01:ci .

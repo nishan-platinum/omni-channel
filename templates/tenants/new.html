@@ -1,0 +1,71 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<p class="crumb"><a href="/admin/tenants">Tenants</a> / New</p>
+<h1>Provision a new tenant</h1>
+<p class="muted">The tenant is created in <strong>Draft</strong>: configuration, entitlements and quotas are seeded from the plan (and template), the data store is provisioned for the plan's tier, the first Tenant Admin is invited and an isolation smoke test runs. Activate it after review.</p>
+{% if let Some(e) = general_error.as_ref() %}<div class="flash flash-error" role="alert">{{ e }}</div>{% endif %}
+<form method="post" action="/admin/tenants" class="form grid-form" novalidate>
+  <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+  <fieldset>
+    <legend>Organisation</legend>
+    <label for="name">Organisation name *</label>
+    <input id="name" name="name" required maxlength="120" value="{{ form.name }}" aria-describedby="name-err" placeholder="e.g. Acme Retail Sdn Bhd">
+    <span id="name-err" class="field-error">{{ self.err("name") }}</span>
+    <label for="legal_name">Legal name</label>
+    <input id="legal_name" name="legal_name" maxlength="200" value="{{ form.legal_name }}" aria-describedby="legal-err" placeholder="Used on invoices">
+    <span id="legal-err" class="field-error">{{ self.err("legal_name") }}</span>
+    <label for="tenant_code">Tenant code</label>
+    <input id="tenant_code" name="tenant_code" maxlength="32" pattern="[a-z0-9-]{3,32}" value="{{ form.tenant_code }}" aria-describedby="code-help code-err" placeholder="auto-suggested from the name">
+    <span id="code-help" class="help">3-32 lowercase letters, digits or hyphens; unique platform-wide; cannot be changed later.</span>
+    <span id="code-err" class="field-error">{{ self.err("tenant_code") }}</span>
+    <label for="primary_admin_email">First admin email *</label>
+    <input id="primary_admin_email" name="primary_admin_email" type="email" required maxlength="320" value="{{ form.primary_admin_email }}" aria-describedby="email-err" placeholder="admin@acme.example">
+    <span id="email-err" class="field-error">{{ self.err("primary_admin_email") }}</span>
+  </fieldset>
+  <fieldset>
+    <legend>Plan, region &amp; storage</legend>
+    <label for="plan_id">Plan *</label>
+    <select id="plan_id" name="plan_id" required data-plan-features="#plan-features" aria-describedby="plan-err">
+      <option value="">Select plan</option>
+      {% for (id, name, tier) in plans %}<option value="{{ id }}" {% if *id == form.plan_id %}selected{% endif %}>{{ name }} — {{ tier }}</option>{% endfor %}
+    </select>
+    <span id="plan-err" class="field-error">{{ self.err("plan_id") }}</span>
+    <p class="help">Reference plans (stand-in for M19): Standard → shared PostgreSQL + RLS, Premium → schema per tenant, Regulated → dedicated database.</p>
+    <div id="plan-features" aria-live="polite"></div>
+    <label for="region">Data region *</label>
+    <select id="region" name="region" required aria-describedby="region-err">
+      {% for (code, label) in regions %}<option value="{{ code }}" {% if *code == form.region.as_str() %}selected{% endif %}>{{ label }} ({{ code }})</option>{% endfor %}
+    </select>
+    <span id="region-err" class="field-error">{{ self.err("region") }}</span>
+    <label for="db_target">Dedicated database target <span class="muted">(Regulated tier only)</span></label>
+    <select id="db_target" name="db_target" aria-describedby="target-err">
+      <option value="">— not applicable —</option>
+      {% for t in targets %}<option value="{{ t.name }}" {% if t.name == form.db_target %}selected{% endif %}>{{ t.name }} — {{ t.engine.label() }} in {{ t.region.as_str() }}</option>{% endfor %}
+    </select>
+    <span id="target-err" class="field-error">{{ self.err("db_target") }}</span>
+    <label for="template_code">Provisioning template</label>
+    <select id="template_code" name="template_code">
+      <option value="">No template (enable all plan entitlements)</option>
+      {% for t in templates %}<option value="{{ t.code }}" {% if t.code == form.template_code %}selected{% endif %}>{{ t.name }} — {{ t.description }}</option>{% endfor %}
+    </select>
+  </fieldset>
+  <fieldset>
+    <legend>Reseller hierarchy</legend>
+    <label for="parent_tenant_id">Parent tenant</label>
+    <select id="parent_tenant_id" name="parent_tenant_id" data-toggle-target="inheritance" aria-describedby="parent-err">
+      <option value="">— none —</option>
+      {% for t in parents %}<option value="{{ t.id }}" {% if t.id.to_string() == form.parent_tenant_id %}selected{% endif %}>{{ t.name }} ({{ t.code }})</option>{% endfor %}
+    </select>
+    <span id="parent-err" class="field-error">{{ self.err("parent_tenant_id") }}</span>
+    <div id="inheritance" class="inheritance" data-show-when-parent>
+      <p class="help">Inheritance options (FD-009) — applied only when a parent is selected.</p>
+      <label class="check"><input type="checkbox" name="inherit_branding" value="true" {% if form.inherit_branding.is_some() %}checked{% endif %}> Inherit branding from parent</label>
+      <label class="check"><input type="checkbox" name="inherit_config" value="true" {% if form.inherit_config.is_some() %}checked{% endif %}> Inherit configuration from parent</label>
+    </div>
+  </fieldset>
+  <div class="actions">
+    <button type="submit" class="btn btn-primary" data-disable-on-submit>Create tenant (Draft)</button>
+    <a class="btn btn-ghost" href="/admin/tenants">Cancel</a>
+  </div>
+</form>
+{% endblock %}
