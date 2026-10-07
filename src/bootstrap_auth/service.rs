@@ -190,14 +190,20 @@ impl AuthService {
             return Err(AppError::validation("password", "BOOTSTRAP_SUPERADMIN_PASSWORD must have at least 12 characters"));
         }
         let hash = hash_password_async(password).await?;
-        sqlx::query("INSERT INTO identity.users (id, tenant_id, email, display_name, role, status, password_hash) VALUES ($1, NULL, $2::citext, 'Platform Super Admin', 'super_admin', 'active', $3)")
-            .bind(Uuid::now_v7())
-            .bind(email)
-            .bind(hash)
-            .execute(&mut *tx)
-            .await?;
+        // Atomic: several instances may start concurrently against an empty database.
+        let inserted = sqlx::query(
+            "INSERT INTO identity.users (id, tenant_id, email, display_name, role, status, password_hash)
+             VALUES ($1, NULL, $2::citext, 'Platform Super Admin', 'super_admin', 'active', $3)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(Uuid::now_v7())
+        .bind(email)
+        .bind(hash)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
         tx.commit().await?;
-        Ok(true)
+        Ok(inserted > 0)
     }
 
     /// Email + password (+ optional organisation code) login. Credentials are verified before any
