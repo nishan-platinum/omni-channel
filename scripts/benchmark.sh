@@ -79,6 +79,8 @@ codes = d.get("statusCodeDistribution", {})
 total = sum(codes.values()) or 1
 ok = codes.get(sys.argv[3], 0)
 ms = lambda v: f"{(v or 0)*1000:.2f}"
+if codes.get("401", 0) and sys.argv[3] != "401":
+    print(f"WARNING {sys.argv[2]}: {codes['401']} x 401 - a benchmark token was rejected mid-run; this run is INVALID", file=sys.stderr)
 print("\t".join([sys.argv[2], f"{s.get('requestsPerSec',0):.0f}", ms(p.get("p50")), ms(p.get("p95")), ms(p.get("p99")),
                  f"{100*(total-ok)/total:.2f}", str(total)]))
 PY
@@ -93,6 +95,8 @@ import sys
 rows = [l.split() for l in open(sys.argv[1]) if l.strip()]
 lat = sorted(float(r[1]) * 1000 for r in rows)
 err = sum(1 for r in rows if not r[0].startswith("2"))
+if any(r[0] == "401" for r in rows):
+    print(f"WARNING {sys.argv[2]}: 401 responses - a benchmark token was rejected mid-run; this run is INVALID", file=sys.stderr)
 q = lambda f: lat[min(len(lat) - 1, int(f * len(lat)))] if lat else 0
 print("\t".join([sys.argv[2], "n/a", f"{q(.5):.2f}", f"{q(.95):.2f}", f"{q(.99):.2f}", f"{100*err/max(1,len(rows)):.2f}", str(len(rows))]))
 PY
