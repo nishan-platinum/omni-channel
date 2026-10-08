@@ -24,6 +24,11 @@ ADR-0013. Voice: **SIMULATED** SBC feed (ADR-0012). Never claim a fake/simulator
 Other modules (M02, M13, M19, M21, M23, M25, M29, M30 …) are **ports + clearly-labelled reference
 adapters** in `src/modules/m01_tenancy/infrastructure/adapters.rs` (+ `tenant_data/targets.rs`, `gate.rs`).
 Never claim a stub or simulator is a production integration.
+**Bake-off gateway** (`src/modules/gateway/`, binary `gateway`, ADR-0014): the ScicomCX bake-off contract
+(`/ingress/*`, `/conversations`, `/presence`, `/config/reload`, `/healthz`, `/metrics`, `/ws/customer|agent`),
+single tenant + shared bearer token by contract, own DB (`migrations/gateway/`), Compose profile `gateway`
+(gw1, gw2, HAProxy :8088). Black-box suite `conformance/` (C01–C51), harness `gw_load` + `scripts/gateway_eval.sh`.
+It is a reference build, NOT an official candidate (not built from a fresh scaffold under the build protocol).
 
 ## Rules that must never be broken
 1. **Tenant isolation.** Tenant context comes only from the authenticated server-side session/token.
@@ -49,8 +54,12 @@ cargo test --all-features                 # needs the Docker DBs (unit tests: ca
 ./scripts/smoke_test.sh                   # end-to-end HTTP smoke (incl. hub flow via hub_load) against a running app
 ./scripts/hub_cluster_test.sh             # 2 hub nodes + nginx: node kill + rolling restart, zero acked loss
 ./scripts/benchmark.sh                    # M01 API; hub: target/release/hub_load idle|latency (performance-testing.md)
+docker compose --profile gateway up -d    # bake-off gateway: gw1, gw2, HAProxy :8088, gateway-db
+RUNS=3 ./conformance/run.sh               # bake-off conformance C01–C51 (3 runs in a row)
+./scripts/gateway_eval.sh e1|e2|e3|e5|e6|e7|e9   # bake-off eval scenarios (scaled to this machine)
 ```
 
 ## Definition of done
 Never claim completion on `cargo build` alone. fmt + clippy (-D warnings) + all tests (including
-isolation tests) + Docker startup + smoke test (+ cluster test for hub changes) must pass. Failed or skipped tests are not "done".
+isolation tests) + Docker startup + smoke test (+ cluster test for hub changes; + `RUNS=3 ./conformance/run.sh`
+for gateway changes) must pass. Failed or skipped tests are not "done".

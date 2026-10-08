@@ -1,0 +1,4 @@
+{"scenario": "e2", "stamp": "20261008T083110Z", "results": [
+{"acked_messages":78800,"agent_reconnects":0,"agent_replies":18800,"agents":200,"conversations":3581,"conversations_with_seq_gaps":0,"customers":2000,"duplicates_delivered":0,"duration_s":120.001062178,"error_rate_pct":0.0,"latency_ms":{"max":4299.726946,"p50":9.781056,"p95":880.519722,"p99":3077.559696,"samples":60000},"lost_acked":0,"mode":"load","post_attempt_errors":0,"post_failed":0,"posts":60000,"rate_achieved":499.99557429750735,"rate_target":500,"run":"8aefe0","stored_but_unacked":0,"undelivered_to_agent":0}
+], "extra": {},
+"images": [{"service":"gw1","image":"sha256:94ae17f982ed11c1f389f10c15a37b4fbb7e90f56f8cedd854c08bec4d2a17c4"},{"service":"gw2","image":"sha256:94ae17f982ed11c1f389f10c15a37b4fbb7e90f56f8cedd854c08bec4d2a17c4"}]}

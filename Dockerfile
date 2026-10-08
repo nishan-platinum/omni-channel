@@ -7,6 +7,7 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs \
     && cargo build --release --locked \
     && rm -rf src target/release/deps/omni_m01* target/release/deps/fake_meta* target/release/deps/hub_load* \
+              target/release/deps/gateway* target/release/deps/gw_load* \
               target/release/omni-m01* target/release/.fingerprint/omni-m01*
 # Templates (Askama) and migrations (SQLx) are compiled into the binary.
 COPY src ./src
@@ -24,6 +25,9 @@ COPY --from=build /build/target/release/omni-m01 /usr/local/bin/omni-m01
 # fake-meta (WhatsApp Cloud API imitation for development/load tests) and the hub load driver.
 COPY --from=build /build/target/release/fake_meta /usr/local/bin/fake_meta
 COPY --from=build /build/target/release/hub_load /usr/local/bin/hub_load
+# Bake-off gateway node and its load/fault harness (ADR-0014).
+COPY --from=build /build/target/release/gateway /usr/local/bin/gateway
+COPY --from=build /build/target/release/gw_load /usr/local/bin/gw_load
 COPY static ./static
 COPY config ./config
 RUN mkdir -p /app/data && chown -R omni:omni /app

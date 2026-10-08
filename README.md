@@ -127,6 +127,25 @@ Two nodes behind a load balancer: `docker compose --profile cluster up -d` → h
 (nodes `app1` + `app2`, nginx round robin, not sticky). `./scripts/hub_cluster_test.sh` kills a node and
 restarts the other while customers and agents chat, then verifies **zero acknowledged messages lost**.
 
+## ScicomCX bake-off gateway (reference build)
+
+A separate, single-tenant gateway that implements the ScicomCX bake-off contract exactly
+(ADR-0014, `docs/architecture/gateway-protocol.md`): `/ingress/whatsapp`, `/ingress/sip`,
+`/conversations`, `/presence`, `/config/reload`, `/healthz`, `/metrics`, `/ws/customer`, `/ws/agent`.
+It has its own binary (`gateway`), database and Compose profile and does not touch the CRM.
+It is a reference build of the contract, the conformance suite and the harness — **not** an
+official bake-off candidate (it was not built from the fresh scaffold under the build protocol).
+
+```bash
+docker compose --profile gateway up -d          # gw1 (:4001), gw2 (:4002), HAProxy (:8088), gateway-db
+RUNS=3 ./conformance/run.sh                     # black-box suite C01–C51, 3 runs in a row
+./scripts/gateway_eval.sh reset                 # empty queues before a measurement
+./scripts/gateway_eval.sh e1|e2|e3|e5|e6|e7|e9  # eval scenarios (scaled to this machine)
+```
+Token: `GATEWAY_TOKEN` (default `dev-gateway-token-change-me`). Results and caveats:
+`docs/architecture/gateway-measurements-2026-10-08.md`; traceability:
+`docs/requirements/gateway-bakeoff-traceability.md`.
+
 ## Walk-through
 
 1. **Create a tenant** — *New tenant*: name, admin email, plan, region (and, for the Regulated plan, a

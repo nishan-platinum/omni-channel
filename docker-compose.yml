@@ -83,7 +83,7 @@ services:
       FAKE_META_LATENCY_MAX_MS: ${FAKE_META_LATENCY_MAX_MS:-80}
       FAKE_META_ERROR_RATE: ${FAKE_META_ERROR_RATE:-0}
       FAKE_META_DUPLICATE_RATE: ${FAKE_META_DUPLICATE_RATE:-0}
-      RUST_LOG: info
+      RUST_LOG: ${GATEWAY_RUST_LOG:-info}
     ports:
       - "58090:8090"
     restart: unless-stopped
@@ -167,8 +167,78 @@ services:
       - app1
       - app2
 
+
+  # ---- profile "gateway": ScicomCX bake-off gateway slice (ADR-0014) --------------------------
+  # Two gateway nodes + HAProxy (:8088, round-robin, no stickiness) + its own PostgreSQL. Nodes are
+  # also reachable directly (gw1 :4001, gw2 :4002) for cross-node conformance tests.
+  gateway-db:
+    image: postgres:16-alpine
+    profiles: ["gateway"]
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=256MB"]
+    environment:
+      POSTGRES_DB: gateway
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${GATEWAY_DB_PASSWORD:-dev-gateway-db-password-change-me}
+    ports:
+      - "55434:5432"
+    volumes:
+      - gateway-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  gw1: &gw
+    image: omni-m01-app:local
+    profiles: ["gateway"]
+    command: ["gateway"]
+    environment: &gw-env
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:-dev-gateway-token-change-me}
+      GATEWAY_DATABASE_URL: postgres://gateway:${GATEWAY_DB_PASSWORD:-dev-gateway-db-password-change-me}@gateway-db:5432/gateway
+      GATEWAY_REDIS_URL: redis://redis:6379
+      GATEWAY_FIXTURE: /app/config/gateway-fixture.json
+      GATEWAY_NODE_ID: gw1
+      LOG_FORMAT: json
+      RUST_LOG: ${GATEWAY_RUST_LOG:-info}
+    ports:
+      - "4001:4000"
+    # Bake-off test box: 4 vCPU per gateway node (memory is bounded by this machine instead).
+    cpus: 4
+    ulimits:
+      nofile: { soft: 1048576, hard: 1048576 }
+    depends_on:
+      gateway-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+  gw2:
+    <<: *gw
+    environment:
+      <<: *gw-env
+      GATEWAY_NODE_ID: gw2
+    ports:
+      - "4002:4000"
+  gw-lb:
+    image: haproxy:3.0-alpine
+    profiles: ["gateway"]
+    environment:
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:-dev-gateway-token-change-me}
+    volumes:
+      - ./docker/gateway/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "8088:8088"
+    ulimits:
+      nofile: { soft: 1048576, hard: 1048576 }
+    depends_on:
+      - gw1
+      - gw2
+    restart: unless-stopped
+
 volumes:
   central-db-data:
   tenant-pg-data:
   tenant-mysql-data:
   app-data:
+  gateway-db-data:
