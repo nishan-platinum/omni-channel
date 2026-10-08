@@ -21,6 +21,7 @@ for run in $(seq 1 "$RUNS"); do
     -v /var/run/docker.sock:/var/run/docker.sock \
     -e GW_URL="${GW_URL:-http://gw-lb:8088}" -e GW_NODE_A="${GW_NODE_A:-http://gw1:4000}" \
     -e GW_NODE_B="${GW_NODE_B:-http://gw2:4000}" -e GW_TOKEN="${GATEWAY_TOKEN:-dev-gateway-token-change-me}" \
+    -e GW_BASE_FIXTURE="${GW_BASE_FIXTURE:-}" \
     gateway-conformance:local "${args[@]}"
 done
 echo "Conformance: $RUNS/$RUNS runs passed"

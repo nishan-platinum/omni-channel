@@ -13,6 +13,7 @@
 #   ./scripts/gateway_eval.sh e6      [CYCLES=2]                            SIGKILL node gw2, 60 s down, restart; under 1×
 #   ./scripts/gateway_eval.sh e7      [SESSIONS=20000]                      rolling restart gw1 then gw2 under idle sessions
 #   ./scripts/gateway_eval.sh e9                                            ingest ceiling (webhooks only)
+#   ./scripts/gateway_eval.sh t10     [DURATION=150 RUNS=3]                 C30–C33 three times while 1× load runs
 #   ./scripts/gateway_eval.sh reset                                         empty conversations/messages (test DB only)
 #
 # Results: one JSON file per run in ${OUT:-eval-results}/ (raw generator output + docker inspect).
@@ -110,7 +111,7 @@ case "$SCENARIO" in
       echo "   idle sessions open: gw1 $(rss_mb gw1) MiB, gw2 $(rss_mb gw2) MiB"
     fi
     echo "== E2: steady load ${RATE:-500} msg/s for ${DURATION:-120}s through the load balancer"
-    gen e2 load --base http://gw-lb:8088 --rate "${RATE:-500}" --duration "${DURATION:-120}" --agents 200 --customers 2000 | tee "$LOG.main"
+    gen e2 load --base http://gw-lb:8088 --rate "${RATE:-500}" --duration "${DURATION:-120}" --agents 200 --customers "${CUSTOMERS:-2000}" | tee "$LOG.main"
     echo "{\"idle_per_node\": $IDLE, \"rss_gw1_mib\": $(rss_mb gw1), \"rss_gw2_mib\": $(rss_mb gw2)}" > "$LOG.extra"
     if [ "$IDLE" -gt 0 ]; then docker ps -q --filter "name=gwload-e2-idle" | xargs -r docker stop -t 2 >/dev/null; wait || true; fi
     cat "$LOG".main "$LOG".idle-* 2>/dev/null > "$LOG"
@@ -171,6 +172,24 @@ case "$SCENARIO" in
     wait || true
     cat "$LOG".[0-9]* > "$LOG"; grep -h '^RESULT' "$LOG"
     record e7 "$LOG"
+    ;;
+  t10)
+    # T10 / E8: the cross-node conformance tests must pass while the cluster carries 1× load. The load
+    # goes in as SIP events (skill voice, agents agent-001…200) so the tests own WhatsApp routing.
+    curl -fsS -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+      --data @conformance/fixtures/t10-load-agents.json http://localhost:8088/config/reload
+    echo "== T10: 1× SIP load for ${DURATION:-150}s; C30–C33 ${RUNS:-3}× during it"
+    gen t10 load --base http://gw-lb:8088 --channel sip --rate 500 --duration "${DURATION:-150}" --agents 200 --customers 2000 > "$LOG.main" 2>&1 &
+    load_pid=$!
+    sleep 20
+    if GW_BASE_FIXTURE=/suite/fixtures/t10-load-agents.json FILTER=test_c3 RUNS="${RUNS:-3}" ./conformance/run.sh > "$LOG.suite" 2>&1; then suite=pass; else suite=fail; fi
+    grep -E "^(PASSED|FAILED)|passed|failed|Conformance" "$LOG.suite"
+    wait "$load_pid" || true
+    echo "{\"suite_under_load\": \"$suite\", \"suite_runs\": ${RUNS:-3}}" > "$LOG.extra"
+    cat "$LOG.main" > "$LOG"; grep '^RESULT' "$LOG"
+    record t10 "$LOG"
+    # Back to the fixture file for the next scenarios.
+    curl -fsS -X POST -H "Authorization: Bearer $TOKEN" http://localhost:8088/config/reload >/dev/null
     ;;
   e9)
     for rate in 500 1000 2000 4000 8000; do

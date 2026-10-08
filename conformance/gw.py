@@ -8,6 +8,8 @@ fault-injection tests (C40-C43, C50). Configuration comes from the environment:
   GW_NODE_B     node B, direct          (default http://gw2:4000)
   GW_TOKEN      shared bearer token     (default dev-gateway-token-change-me)
   GW_SERVICE_A / GW_SERVICE_B   docker compose service names of the nodes (default gw1 / gw2)
+  GW_BASE_FIXTURE  optional fixture file whose agents/skills are kept in every fixture a test sets
+                   (T10: the load generator's agents stay routable while the tests run)
 """
 
 from __future__ import annotations
@@ -68,6 +70,13 @@ def post_sip(c: httpx.Client, call_id: str, frm: str, event: str, at: str | None
 def set_fixture(skills: list[str], agents: dict[str, list[str]], channel_to_skill: dict[str, str], base: str = GW_URL) -> None:
     """Applies a platform fixture (POST /config/reload with the fixture as body)."""
     body = {"skills": skills, "agents": [{"id": a, "skills": s} for a, s in agents.items()], "channel_to_skill": channel_to_skill}
+    base_file = os.environ.get("GW_BASE_FIXTURE")
+    if base_file:
+        with open(base_file) as f:
+            keep = json.load(f)
+        body["skills"] = sorted(set(body["skills"]) | set(keep.get("skills", [])))
+        body["agents"] = keep.get("agents", []) + [a for a in body["agents"] if a["id"] not in {k["id"] for k in keep.get("agents", [])}]
+        body["channel_to_skill"] = {**body["channel_to_skill"], **keep.get("channel_to_skill", {})}
     with http(base) as c:
         r = c.post("/config/reload", json=body)
         assert r.status_code == 204, r.text

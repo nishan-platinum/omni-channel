@@ -114,6 +114,8 @@ async fn ramp(a: &Args) -> R<()> {
     let failed = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicUsize::new(0));
     let resumed = Arc::new(AtomicUsize::new(0));
+    // Sessions that lost their connection at least once (T9: survive without reconnecting).
+    let ever_dropped = Arc::new(AtomicUsize::new(0));
     let pongs = Arc::new(Mutex::new(Vec::<f64>::new()));
     let stop = Arc::new(AtomicBool::new(false));
     let started = Instant::now();
@@ -126,8 +128,10 @@ async fn ramp(a: &Args) -> R<()> {
         let (url, id) = (url.clone(), format!("{prefix}-{i}"));
         let (c_connected, c_failed, c_dropped, c_resumed, c_pongs, c_stop) =
             (connected.clone(), failed.clone(), dropped.clone(), resumed.clone(), pongs.clone(), stop.clone());
+        let c_ever = ever_dropped.clone();
         tasks.spawn(async move {
             let (connected, failed, dropped, resumed, pongs, stop) = (c_connected, c_failed, c_dropped, c_resumed, c_pongs, c_stop);
+            let mut counted_drop = false;
             let mut session: Option<String> = None;
             let mut first = true;
             loop {
@@ -142,6 +146,10 @@ async fn ramp(a: &Args) -> R<()> {
                             return;
                         }
                         dropped.fetch_add(1, Ordering::Relaxed);
+                        if !counted_drop {
+                            counted_drop = true;
+                            c_ever.fetch_add(1, Ordering::Relaxed);
+                        }
                         if !reconnect {
                             return;
                         }
@@ -198,6 +206,7 @@ async fn ramp(a: &Args) -> R<()> {
         "mode": "ramp", "sessions": n, "connected": connected.load(Ordering::Relaxed),
         "failed": failed.load(Ordering::Relaxed), "dropped": dropped.load(Ordering::Relaxed),
         "resumed": resumed.load(Ordering::Relaxed), "ramp_secs": ramp_secs,
+        "sessions_never_dropped": connected.load(Ordering::Relaxed).saturating_sub(ever_dropped.load(Ordering::Relaxed)),
         "pong_ms": { "samples": p.len(), "p50": pct(&p, 50.0), "p99": pct(&p, 99.0), "max": p.last().copied().unwrap_or(f64::NAN) },
     });
     println!("RESULT {report}");
@@ -312,6 +321,9 @@ async fn load(a: &Args) -> R<()> {
     let rate = a.n("rate", 500).max(1);
     let duration = Duration::from_secs(a.n("duration", 60));
     let reply_every = a.n("reply-every", 10);
+    // `sip` sends the load as SIP call events (skill from `channel_to_skill.sip`), leaving WhatsApp
+    // routing free for conformance tests that run at the same time (T10).
+    let sip = a.s("channel", "whatsapp") == "sip";
     let run = a.s("run", &format!("{:x}", rand_u64() & 0xffffff));
     let ledger = Arc::new(Ledger::default());
     let stop = Arc::new(AtomicBool::new(false));
@@ -351,7 +363,7 @@ async fn load(a: &Args) -> R<()> {
         let customer = format!("ld-{run}-{}", i as usize % customers);
         let ext = format!("{run}-{i}");
         tokio::spawn(async move {
-            post_inbound(&t_http, &t_base, &customer, &ext, &t_ledger).await;
+            post_inbound(&t_http, &t_base, &customer, &ext, &t_ledger, sip).await;
             drop(permit);
         });
         if last_report.elapsed() >= Duration::from_secs(10) {
@@ -453,14 +465,20 @@ async fn load(a: &Args) -> R<()> {
     Ok(())
 }
 
-async fn post_inbound(http: &reqwest::Client, base: &str, customer: &str, ext: &str, ledger: &Ledger) {
+async fn post_inbound(http: &reqwest::Client, base: &str, customer: &str, ext: &str, ledger: &Ledger, sip: bool) {
     ledger.posts.fetch_add(1, Ordering::Relaxed);
-    let body = json!({ "external_id": ext, "from": customer, "text": format!("load {ext}"), "sent_at": chrono::Utc::now().to_rfc3339() });
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    // SIP: one call per customer, a `dtmf` event per message; the message key travels in `digits`.
+    let (path, body) = if sip {
+        ("sip", json!({ "call_id": format!("call-{customer}"), "from": customer, "event": "dtmf", "at": now, "digits": ext }))
+    } else {
+        ("whatsapp", json!({ "external_id": ext, "from": customer, "text": format!("load {ext}"), "sent_at": now }))
+    };
     if let Ok(mut p) = ledger.pending.lock() {
         p.insert(ext.to_string(), Instant::now());
     }
     for attempt in 0..3 {
-        match http.post(format!("{base}/ingress/whatsapp")).bearer_auth(token()).json(&body).send().await {
+        match http.post(format!("{base}/ingress/{path}")).bearer_auth(token()).json(&body).send().await {
             Ok(r) if r.status().as_u16() == 202 => {
                 if let Ok(v) = r.json::<Value>().await {
                     let (conv, mid) = (v["conversation_id"].as_str().unwrap_or(""), v["message_id"].as_str().unwrap_or(""));
@@ -594,7 +612,7 @@ async fn agent_loop(
                             }
                             if m["direction"] == "inbound" {
                                 if let Ok(mut d) = ledger.delivered.lock() { d.insert(mid.clone()); }
-                                if let Some(ext) = m["external_id"].as_str() {
+                                if let Some(ext) = m["body"]["digits"].as_str().or(m["external_id"].as_str()) {
                                     let sent = ledger.pending.lock().ok().and_then(|mut p| p.remove(ext));
                                     if let Some(s) = sent {
                                         if let Ok(mut l) = ledger.latencies_ms.lock() { l.push(s.elapsed().as_secs_f64() * 1000.0); }

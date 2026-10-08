@@ -63,18 +63,18 @@ The suite passed 3 runs in a row (33/33 each) against the two-node deployment.
 
 ## Thresholds (spec section 4) — see the measurements document for numbers and caveats
 
-| ID | Status on this machine |
+| ID | Status on this machine (final runs) |
 |---|---|
 | T1 ≥ 100k idle sessions / node | Met (100k, 4 CPUs) |
 | T2 ≤ 40 KB / session | Met (16.4 KB) |
-| T3 p99 ≤ 250 ms at 1× | Not proven: 142 ms without idle sessions; full 1× with 50k idle/node fails here (database commit stalls on the laptop disk) |
-| T4 p99 ≤ 1 s at 2× | Met without idle sessions (92 ms) |
-| T5 errors ≤ 0.1 % at 2× | Met without idle sessions (0 %) |
+| T3 p99 ≤ 250 ms at 1× | Met (median 13.6 ms of 3 runs, with 50k idle/node) |
+| T4 p99 ≤ 1 s at 2× | Met (median 15.3 ms) |
+| T5 errors ≤ 0.1 % at 2× | Met (0 %) |
 | T6 0 lost on worker kill | Met |
 | T7 0 lost on node kill | Met |
 | T8 re-routed ≤ 30 s, 100 % | Met (max 3.5 s) |
-| T9 ≥ 99 % survive rolling deploy without reconnect | **Not met** (drain + resume; ADR-0014) |
-| T10 C30–C33 under load | Partly shown (suite passes; not run concurrently with load) |
+| T9 ≥ 99 % survive rolling deploy without reconnect | **Not met** (0 %; drain + resume, ADR-0014) |
+| T10 C30–C33 under load | Met (3/3 runs during 1× load) |
 
 ## Not a bake-off candidate
 This is a reference build of the contract, suite and harness. It was not built from the fresh
