@@ -3,6 +3,8 @@
 <h1>Contact centre hub</h1>
 <p class="help">M10 gateway slice: channels → canonical messages → durable ordered store → skill routing → live agent and customer sessions. This page was served by node <code>{{ node }}</code> (real-time bus: <code>{{ bus }}</code>; live sockets on this node: {{ agent_sockets }} agent / {{ customer_sockets }} customer).</p>
 
+{% include "hub/_meta_status.html" %}
+
 <div class="grid2">
   <section class="card">
     <h2>Queues by skill</h2>
@@ -26,11 +28,24 @@
         <td><span class="tag">{{ e.default_skill }}</span></td></tr>
     {% endfor %}
     </tbody></table>{% endif %}
+    <details class="editor">
+      <summary>Connect a WhatsApp number (Meta phone number ID)</summary>
+      <form method="post" action="/hub/admin/whatsapp" class="form">
+        <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+        <p class="help">For real WhatsApp: copy the <strong>Phone number ID</strong> from Meta → WhatsApp → API Setup. Incoming messages to that number are routed to this tenant.</p>
+        <div class="two-col">
+          <div><label for="pn">Phone number ID</label><input id="pn" name="phone_number_id" inputmode="numeric" required></div>
+          <div><label for="pl">Label</label><input id="pl" name="label" placeholder="+1 555 633 4349 (Meta test number)"></div>
+          <div><label for="ps">Routes to skill</label><input id="ps" name="skill" value="support"></div>
+        </div>
+        <button class="btn btn-primary" type="submit">Connect number</button>
+      </form>
+    </details>
     <details class="editor" {% if endpoints.is_empty() %}open{% endif %}>
       <summary>Create simulated channels</summary>
       <form method="post" action="/hub/admin/channels" class="form">
         <input type="hidden" name="_csrf" value="{{ page.csrf }}">
-        <p class="help">Creates a fake WhatsApp number, a fake voice DID and a web-chat widget. No credentials are needed; nothing leaves this server.</p>
+        <p class="help">Creates a WhatsApp number on the fake-meta server (only when WHATSAPP_PROVIDER=fake), a simulated voice DID and a web-chat widget. No credentials are needed.</p>
         <div class="two-col">
           <div><label for="ws">WhatsApp → skill</label><input id="ws" name="whatsapp_skill" value="support"></div>
           <div><label for="vs">Voice → skill</label><input id="vs" name="voice_skill" value="support"></div>

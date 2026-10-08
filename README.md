@@ -7,7 +7,8 @@ resource usage can be compared with implementations in other languages.
 * **Scope:** M01 only — all 27 unified requirements (P1 and P2), business rules BR-M01-001…005, field
   dependencies FD-008…011, notifications NT-001…003, the tenant state machine and the M01 `/v1` API.
   Other modules (M02–M40) appear only as ports with clearly-labelled **reference adapters**.
-* **Plus the M10 omnichannel hub gateway slice:** simulated WhatsApp and SIP channels → one canonical
+* **Plus the M10 omnichannel hub gateway slice:** WhatsApp (real Cloud API — real Meta or the fake-meta
+  load-test server) and a simulated SIP feed → one canonical
   message → durable, ordered store → skill-based routing with queues → live agent and customer
   WebSocket sessions (heartbeat, resume), across two nodes behind a load balancer. **No real WhatsApp
   or telco credentials are needed** — the channels are labelled simulators (ADR-0011, ADR-0012).
@@ -76,11 +77,11 @@ With `HUB_DEMO_SEED=true` (the default in `.env.example`, development only) the 
 
 1. **Agent:** in one browser, sign in as `agent.support@…` → you land on the **Agent desktop**. Set your
    status to **Available**.
-2. **Customer on WhatsApp (simulated):** in a *private* window, sign in as `admin@demo.omni.local` →
-   **Simulator** → *WhatsApp: customer sends a message*. The message appears on the agent desktop within
-   a second (routed by skill `support`). Reply from the desktop: the reply goes to the fake WhatsApp
-   provider and its status moves **queued → sent → delivered → read**. Put `[fail]` in a reply to see the
-   retry ladder.
+2. **Customer on WhatsApp (fake-meta):** in a *private* window, sign in as `admin@demo.omni.local` →
+   **Simulator** → *WhatsApp: customer sends a message*. The fake-meta server delivers it to the hub as a
+   signed webhook; it appears on the agent desktop within a second (skill `support`). The agent's reply
+   goes out through the real Cloud API adapter to fake-meta, and its status moves **queued → sent →
+   delivered → read**. `[fail]` in a reply = permanent error, `[retry]` = retry ladder.
 3. **Phone call (simulated SBC):** Simulator → *Voice*: send `ringing`, `answered`, `ended` with the same
    call id → one ordered voice conversation on the desktop.
 4. **Web chat:** Simulator (or *Contact centre*) → **Open customer chat**. Sign in as `agent.sales@…` /
@@ -88,6 +89,39 @@ With `HUB_DEMO_SEED=true` (the default in `.env.example`, development only) the 
    customer has seen the reply. Reload either page: history and conversation resume.
 5. **Contact centre** (Tenant Admin) shows queues per skill, agents with live status/load, channels and
    recent conversations, and lets you add agents and simulated channels.
+
+### Real WhatsApp (real phones) — only `.env` changes
+
+Needs a Meta app with WhatsApp (developers.facebook.com → your app → WhatsApp → API Setup). In `.env`:
+
+```env
+WHATSAPP_PROVIDER=meta
+WHATSAPP_ACCESS_TOKEN=EAA...            # API Setup → Generate access token (temporary ones last 24 h)
+WHATSAPP_APP_SECRET=...                 # App settings → Basic → App secret
+WHATSAPP_PHONE_NUMBER_ID=...            # API Setup, under the test number
+WHATSAPP_APP_ID=...                     # app dashboard / App settings → Basic
+WHATSAPP_BUSINESS_ACCOUNT_ID=...        # API Setup, next to the Phone number ID
+WHATSAPP_DISPLAY_NUMBER=+1 555 ...      # label only
+WHATSAPP_VERIFY_TOKEN=any-word-you-like
+COMPOSE_PROFILES=tunnel                 # public HTTPS address via cloudflared (no account)
+```
+
+Then `docker compose up -d`. The hub checks the token, opens the tunnel, **registers its webhook in Meta
+by itself** and connects the number to tenant `demo` (skill `support`). The **Real WhatsApp (Meta)
+connection** box on the Simulator / Contact centre page turns green when ready. From a phone on the
+app's recipient list (max. 5), send a WhatsApp message to the test number → it appears on the agent
+desktop → the agent's reply arrives on the phone. Limits of Meta test numbers: the customer must write
+first (24-hour window), only verified recipients, no bulk. For a fixed tunnel address use
+`COMPOSE_PROFILES=tunnel-ngrok` with `NGROK_AUTHTOKEN` and `NGROK_DOMAIN`. Switch back to
+`WHATSAPP_PROVIDER=fake` for bulk tests.
+
+### WhatsApp bulk load (fake-meta)
+
+`./target/release/hub_load whatsapp --customers 500 --messages 5 --rate 200` (or the *WhatsApp bulk
+load* form on the Simulator page): fake customers write through signed webhooks, bot agents reply, and
+fake-meta reports the hub's ack latency and the full round trip. Tunables: `FAKE_META_RATE_PER_SEC`
+(per-number send limit, default 80 like Meta), `FAKE_META_LATENCY_*`, `FAKE_META_ERROR_RATE`,
+`FAKE_META_DUPLICATE_RATE`.
 
 Two nodes behind a load balancer: `docker compose --profile cluster up -d` → http://localhost:8080
 (nodes `app1` + `app2`, nginx round robin, not sticky). `./scripts/hub_cluster_test.sh` kills a node and
@@ -239,7 +273,7 @@ scripts/                smoke_test.sh, benchmark.sh, hub_cluster_test.sh
 | AnonymisedDataCopyPort | M29/M38 | copies nothing (no M01 business data) |
 | Metering endpoint | M21 | `POST /v1/reference/metering/{id}` (Super Admin) + automatic API-call metering |
 | Secret resolver | vault | `env:TENANT_DB_*` variables only; HMAC-derived per-tenant DB logins |
-| ChannelAdapter `whatsapp` | WhatsApp BSP / Meta Cloud API (M05) | **simulated**: signed Meta-shaped webhooks, fake BSP with delivered/read receipts, `[fail]` triggers retries |
+| ChannelAdapter `whatsapp` | Meta WhatsApp Cloud API (M05) | **real adapter**; with `WHATSAPP_PROVIDER=fake` it talks to **fake-meta** (not WhatsApp): same API, signed webhooks, receipts, limits, `[fail]`/`[retry]` markers, bulk generator |
 | ChannelAdapter `voice` | TM SBC / voice connector (M03) | **simulated**: signed JSON call-event feed, no SIP/media |
 
 ## Known prototype limitations
@@ -247,5 +281,5 @@ scripts/                smoke_test.sh, benchmark.sh, hub_cluster_test.sh
 See DESIGN.md §18: reference adapters above; per-instance rate limiter; audit hash chain serialises audited
 writes; Super Admin, Tenant Admin and Agent roles only; tenant data plane holds only the M01 isolation
 canary; no real DNS/TLS/email/PDF. Hub: see DESIGN.md §20 and `docs/requirements/m10-hub-traceability.md`
-(no contact/case linking, no priority/business-hours/SLA routing, no WhatsApp templates/24 h window, simulated
-channels only). The confidential specification PDF is git-ignored and must never be committed.
+(no contact/case linking, no priority/business-hours/SLA routing, no WhatsApp templates for
+business-initiated messages; voice is simulated). The confidential specification PDF is git-ignored and must never be committed.

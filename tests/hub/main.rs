@@ -81,13 +81,15 @@ async fn routing_respects_skills_and_capacity_and_close_frees_capacity() {
 }
 
 #[tokio::test]
-async fn agent_reply_is_acked_after_commit_and_receipts_reach_read() {
+async fn agent_reply_goes_through_the_cloud_api_and_receipts_reach_read() {
     let h = HubApp::new().await;
     let t = h.tenant().await;
     let (_, tok) = h.agent(&t, &["support"], 3).await;
     let (mut ws, _) = h.agent_online(&tok, true).await;
-    h.whatsapp_inbound(&t.whatsapp, "60100000021", "Can you help?", &wamid()).await;
+    // Customer writes via fake-meta → signed webhook over HTTP → hub.
+    h.customer_writes(&t.whatsapp, "60100000021", "Can you help?").await;
     let a = recv_type(&mut ws, "conversation.assigned").await;
+    assert_eq!(a["messages"][0]["body"], "Can you help?");
     let conv = conv_id(&a);
 
     send(&mut ws, json!({ "type": "message.send", "conversation_id": conv, "client_msg_id": "r1", "body": "Yes, checking now" })).await;
@@ -96,32 +98,46 @@ async fn agent_reply_is_acked_after_commit_and_receipts_reach_read() {
     assert_eq!(ack["message"]["seq"], 2);
     assert_eq!(ack["message"]["delivery_status"], "queued");
 
-    // Fake BSP: queued → sent → delivered → read, through the signed webhook path.
+    // Real adapter: POST /{v}/{phone_number_id}/messages to fake-meta, which answers with
+    // sent → delivered → read status webhooks.
     let data = h
-        .pump_until(&tok, &conv, |d| {
+        .pump_until(t.tenant_id, &tok, &conv, |d: &Value| {
             d["messages"].as_array().is_some_and(|m| m.iter().any(|x| x["seq"] == 2 && x["delivery_status"] == "read"))
         })
         .await;
     assert_eq!(data["messages"][1]["direction"], "outbound");
     let st = recv_type(&mut ws, "message.status").await;
     assert_eq!(st["seq"], 2);
+    let phone = h.fake_outbox(&t.whatsapp).await;
+    assert!(
+        phone.iter().any(|m| m["to"] == "60100000021" && m["text"] == "Yes, checking now"),
+        "the customer's phone got the reply: {phone:?}"
+    );
+}
+
+async fn queued_reply(h: &HubApp, t: &HubTenant, customer: &str, via_fake_meta: bool, body: &str) -> (String, String, Uuid) {
+    let (_, tok) = h.agent(t, &["support"], 3).await;
+    let (mut ws, _) = h.agent_online(&tok, true).await;
+    if via_fake_meta {
+        h.customer_writes(&t.whatsapp, customer, "hi").await;
+    } else {
+        h.whatsapp_inbound(&t.whatsapp, customer, "hi", &wamid()).await;
+    }
+    let conv = conv_id(&recv_type(&mut ws, "conversation.assigned").await);
+    send(&mut ws, json!({ "type": "message.send", "conversation_id": conv, "client_msg_id": "f1", "body": body })).await;
+    let ack = recv_type(&mut ws, "ack").await;
+    (tok, conv, Uuid::parse_str(ack["message"]["id"].as_str().unwrap()).unwrap())
 }
 
 #[tokio::test]
-async fn failed_delivery_enters_retry_ladder() {
+async fn transient_cloud_api_error_enters_retry_ladder() {
     let h = HubApp::new().await;
     let t = h.tenant().await;
-    let (_, tok) = h.agent(&t, &["support"], 3).await;
-    let (mut ws, _) = h.agent_online(&tok, true).await;
-    h.whatsapp_inbound(&t.whatsapp, "60100000031", "hi", &wamid()).await;
-    let conv = conv_id(&recv_type(&mut ws, "conversation.assigned").await);
-    send(&mut ws, json!({ "type": "message.send", "conversation_id": conv, "client_msg_id": "f1", "body": "this will [fail]" })).await;
-    let ack = recv_type(&mut ws, "ack").await;
-    let mid = Uuid::parse_str(ack["message"]["id"].as_str().unwrap()).unwrap();
-    // Poll the queue row: first attempt fails → attempts 1, next attempt ≈ +60 s, still queued.
+    let (tok, conv, mid) = queued_reply(&h, &t, "60100000031", true, "this will [retry]").await;
+    // fake-meta answers 500 / 131000 → attempts 1, next attempt ≈ +60 s, still queued.
     let mut attempts = 0i32;
     for _ in 0..50 {
-        let _ = h.app.state.hub.delivery_tick().await;
+        h.app.state.hub.delivery_tick_for_tenant(t.tenant_id).await.unwrap();
         attempts = sqlx::query_scalar("SELECT attempts FROM hub.outbound_queue WHERE message_id = $1")
             .bind(mid)
             .fetch_optional(&h.app.state.db.owner)
@@ -145,6 +161,40 @@ async fn failed_delivery_enters_retry_ladder() {
     assert_eq!(r.data()["messages"][1]["delivery_status"], "queued");
 }
 
+async fn wait_failed(h: &HubApp, t: &HubTenant, tok: &str, conv: &str, mid: Uuid) -> String {
+    h.pump_until(t.tenant_id, tok, conv, |d: &Value| d["messages"][1]["delivery_status"] == "failed").await;
+    let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM hub.outbound_queue WHERE message_id = $1")
+        .bind(mid)
+        .fetch_one(&h.app.state.db.owner)
+        .await
+        .unwrap();
+    assert_eq!(queued, 0, "permanent errors are not retried");
+    sqlx::query_scalar("SELECT detail FROM hub.message_status_events WHERE message_id = $1 AND status = 'failed'")
+        .bind(mid)
+        .fetch_one(&h.app.state.db.owner)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn permanent_cloud_api_error_fails_at_once() {
+    let h = HubApp::new().await;
+    let t = h.tenant().await;
+    let (tok, conv, mid) = queued_reply(&h, &t, "60100000032", true, "this will [fail]").await;
+    let detail = wait_failed(&h, &t, &tok, &conv, mid).await;
+    assert!(detail.contains("131026"), "{detail}");
+}
+
+#[tokio::test]
+async fn reply_outside_the_24_hour_window_is_refused_like_whatsapp() {
+    let h = HubApp::new().await;
+    let t = h.tenant().await;
+    // The customer's message reached the hub but fake-meta never saw it → no open window.
+    let (tok, conv, mid) = queued_reply(&h, &t, "60100000033", false, "hello again").await;
+    let detail = wait_failed(&h, &t, &tok, &conv, mid).await;
+    assert!(detail.contains("131047"), "{detail}");
+}
+
 #[tokio::test]
 async fn per_conversation_order_is_strict_and_client_retries_are_idempotent() {
     let h = HubApp::new().await;
@@ -158,10 +208,10 @@ async fn per_conversation_order_is_strict_and_client_retries_are_idempotent() {
     let mut tasks = Vec::new();
     for i in 0..15 {
         let app = h.app.router.clone();
-        let (wa, sec) = (t.whatsapp.clone(), h.app.state.config.hub_sim_whatsapp_app_secret.clone());
+        let (wa, sec) = (t.whatsapp.clone(), FAKE_SECRET.to_string());
         tasks.push(tokio::spawn(async move {
             use tower::ServiceExt;
-            let body = omni_m01::modules::m10_hub::infrastructure::channels::whatsapp_sim::inbound_payload(
+            let body = omni_m01::modules::m10_hub::infrastructure::channels::whatsapp::inbound_payload(
                 &wa,
                 "60100000041",
                 "C",
@@ -305,9 +355,8 @@ async fn sip_call_events_become_an_ordered_voice_conversation() {
 async fn webhooks_reject_bad_signatures_and_unknown_numbers() {
     let h = HubApp::new().await;
     let t = h.tenant().await;
-    let body =
-        omni_m01::modules::m10_hub::infrastructure::channels::whatsapp_sim::inbound_payload(&t.whatsapp, "6011", "x", "hi", &wamid())
-            .to_string();
+    let body = omni_m01::modules::m10_hub::infrastructure::channels::whatsapp::inbound_payload(&t.whatsapp, "6011", "x", "hi", &wamid())
+        .to_string();
     let (st, _) = h.raw_post("/v1/hub/channels/whatsapp/webhook", &body, &[("x-hub-signature-256", "sha256=deadbeef")]).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
     let (st, _) = h.raw_post("/v1/hub/channels/whatsapp/webhook", &body, &[]).await;
@@ -321,15 +370,14 @@ async fn webhooks_reject_bad_signatures_and_unknown_numbers() {
         .app
         .send(
             axum::http::Method::GET,
-            "/v1/hub/channels/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=dev-sim-verify-token&hub.challenge=12345",
+            "/v1/hub/channels/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=test-verify-token&hub.challenge=12345",
             None,
             None,
             &[],
         )
         .await;
-    let expected =
-        if h.app.state.config.hub_sim_whatsapp_verify_token == "dev-sim-verify-token" { StatusCode::OK } else { StatusCode::FORBIDDEN };
-    assert_eq!(ok.status, expected);
+    assert_eq!(ok.status, StatusCode::OK);
+    assert_eq!(ok.text, "12345");
     let bad = h
         .app
         .send(
@@ -411,4 +459,103 @@ async fn going_offline_hands_open_conversations_to_another_agent() {
     h.whatsapp_inbound(&t.whatsapp, "60100000071", "second", &wamid()).await;
     let m = recv_type(&mut ws2, "message.new").await;
     assert_eq!(m["message"]["body"], "second");
+}
+
+#[tokio::test]
+async fn bulk_whatsapp_traffic_from_fake_meta_is_all_stored_in_order() {
+    let h = HubApp::new().await;
+    let t = h.tenant().await;
+    let sim = h.app.state.hub.simulator.clone().unwrap();
+    // 20 customers × 5 messages at 200/s, all through signed HTTP webhooks.
+    sim.start_load(&t.whatsapp, 20, 5, 200).await.unwrap();
+    let mut stored = 0i64;
+    for _ in 0..100 {
+        stored = sqlx::query_scalar(
+            "SELECT count(*) FROM hub.messages m JOIN hub.conversations c ON c.id = m.conversation_id
+              JOIN hub.channel_endpoints e ON e.id = c.endpoint_id WHERE e.address = $1",
+        )
+        .bind(&t.whatsapp)
+        .fetch_one(&h.app.state.db.owner)
+        .await
+        .unwrap();
+        if stored == 100 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(stored, 100, "every bulk message stored exactly once");
+    let gaps: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM hub.conversations c JOIN hub.channel_endpoints e ON e.id = c.endpoint_id
+          WHERE e.address = $1 AND c.last_seq <> (SELECT count(*) FROM hub.messages m WHERE m.conversation_id = c.id)",
+    )
+    .bind(&t.whatsapp)
+    .fetch_one(&h.app.state.db.owner)
+    .await
+    .unwrap();
+    assert_eq!(gaps, 0, "per-conversation sequences are gap-free");
+    let stats = sim.stats().await.unwrap();
+    assert_eq!(stats["webhooks_given_up"], 0);
+    assert!(stats["inbound_ack"]["count"].as_u64().unwrap() >= 100);
+}
+
+fn meta_settings(h: &HubApp, token: &str, app_secret: &str) -> omni_m01::platform::config::WhatsAppSettings {
+    let mut w = h.app.state.config.whatsapp.clone();
+    w.provider = "meta".into();
+    w.base_url = format!("http://{}", h.fake_meta);
+    w.access_token = token.into();
+    w.app_secret = app_secret.into();
+    w.phone_number_id = Some("1279886618550689".into());
+    w.app_id = Some("1101641942562622".into());
+    w.business_account_id = Some("933506166148717".into());
+    w.public_base_url = Some(format!("http://{}", h.addr));
+    w
+}
+
+#[tokio::test]
+async fn meta_auto_setup_checks_token_and_registers_the_webhook() {
+    use omni_m01::modules::m10_hub::infrastructure::channels::whatsapp_setup::MetaLink;
+    let h = HubApp::new().await;
+    // Against fake-meta, which behaves like Meta: number lookup with the token, subscription with
+    // the app token {app_id}|{app_secret} and a GET verification handshake to our callback.
+    let link = MetaLink::new(meta_settings(&h, FAKE_TOKEN, FAKE_SECRET));
+    link.sync(true).await;
+    let st = link.status();
+    assert!(st.number.as_ref().unwrap().ok, "{st:?}");
+    assert!(st.webhook.as_ref().unwrap().ok, "{st:?}");
+    assert!(st.waba.as_ref().unwrap().ok, "{st:?}");
+    assert!(st.all_ok());
+    assert_eq!(st.callback_url.as_deref(), Some(format!("http://{}/v1/hub/channels/whatsapp/webhook", h.addr).as_str()));
+
+    // Wrong token → number check shows Meta's error 190; wrong app secret → registration fails.
+    let bad = MetaLink::new(meta_settings(&h, "expired-token", "wrong-app-secret"));
+    bad.sync(true).await;
+    let st = bad.status();
+    assert!(!st.number.as_ref().unwrap().ok && st.number.as_ref().unwrap().detail.contains("190"), "{st:?}");
+    assert!(
+        !format!("{st:?}").contains("expired-token") && !format!("{st:?}").contains("wrong-app-secret"),
+        "secrets must be redacted: {st:?}"
+    );
+    assert!(!st.webhook.as_ref().unwrap().ok, "{st:?}");
+    assert!(!st.all_ok());
+
+    // Missing IDs → manual setup hint, no registration attempt.
+    let mut w = meta_settings(&h, FAKE_TOKEN, FAKE_SECRET);
+    w.app_id = None;
+    let manual = MetaLink::new(w);
+    manual.sync(true).await;
+    let st = manual.status();
+    assert!(st.manual_reason.is_some() && st.webhook.is_none(), "{st:?}");
+}
+
+#[tokio::test]
+async fn webhook_registration_fails_when_the_verify_token_does_not_match() {
+    use omni_m01::modules::m10_hub::infrastructure::channels::whatsapp_setup::MetaLink;
+    let h = HubApp::new().await;
+    let mut w = meta_settings(&h, FAKE_TOKEN, FAKE_SECRET);
+    w.verify_token = "not-the-hub-verify-token".into();
+    let link = MetaLink::new(w);
+    link.sync(true).await;
+    let st = link.status();
+    let hook = st.webhook.unwrap();
+    assert!(!hook.ok && hook.detail.contains("2200"), "callback verification must fail: {}", hook.detail);
 }

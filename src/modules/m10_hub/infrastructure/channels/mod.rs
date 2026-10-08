@@ -1,9 +1,15 @@
-//! Channel adapters. Everything here is a **SIMULATED** stand-in (ADR-0012): no Meta, BSP, SBC or
-//! carrier is contacted. Real adapters implement the same `ChannelAdapter` contract later.
+//! Channel adapters (common contract `ChannelAdapter`, OCC-M10-R022).
+//! * `whatsapp_cloud` — WhatsApp Cloud API: real Meta or the fake-meta server (ADR-0013).
+//! * `whatsapp_setup` — automatic Meta setup (number check, webhook registration) for `meta`.
+//! * `sip_sim` — **SIMULATED** SBC call-event feed (ADR-0012); no SIP trunk is contacted.
+//! * `webchat` — the hub's own customer WebSocket.
 
+pub mod fake_meta_client;
 pub mod sip_sim;
 pub mod webchat;
-pub mod whatsapp_sim;
+pub mod whatsapp;
+pub mod whatsapp_cloud;
+pub mod whatsapp_setup;
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;

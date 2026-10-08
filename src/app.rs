@@ -24,13 +24,16 @@ use crate::modules::m01_tenancy::infrastructure::adapters::*;
 use crate::modules::m01_tenancy::infrastructure::gate::M01TenantGate;
 use crate::modules::m01_tenancy::infrastructure::persistence::PgStore;
 use crate::modules::m01_tenancy::infrastructure::tenant_data::{targets::load_targets, DataPlaneRouter};
+use crate::modules::m10_hub::application::ports::ProviderSimulator;
 use crate::modules::m10_hub::application::ports::{ChannelAdapter, RealtimeBus};
 use crate::modules::m10_hub::application::sessions::SessionRegistry;
 use crate::modules::m10_hub::application::HubService;
 use crate::modules::m10_hub::infrastructure::bus::{LocalBus, RedisBus};
+use crate::modules::m10_hub::infrastructure::channels::fake_meta_client::FakeMetaClient;
 use crate::modules::m10_hub::infrastructure::channels::sip_sim::SimSipAdapter;
 use crate::modules::m10_hub::infrastructure::channels::webchat::WebChatAdapter;
-use crate::modules::m10_hub::infrastructure::channels::whatsapp_sim::SimWhatsAppAdapter;
+use crate::modules::m10_hub::infrastructure::channels::whatsapp_cloud::{CloudProvider, WhatsAppCloudAdapter, WhatsAppCloudConfig};
+use crate::modules::m10_hub::infrastructure::channels::whatsapp_setup::MetaLink;
 use crate::modules::m10_hub::infrastructure::persistence::PgHubRepository;
 use crate::platform::config::AppConfig;
 use crate::platform::db::{self, Db};
@@ -54,6 +57,8 @@ pub struct AppInner {
     /// database). A reconnect storm — e.g. every client of a crashed node arriving at once — then
     /// queues here instead of starving the pool for message traffic.
     pub ws_admission: Arc<tokio::sync::Semaphore>,
+    /// Real Meta only: token/number check + automatic webhook registration, shown on the status box.
+    pub meta_link: Option<Arc<MetaLink>>,
 }
 
 #[derive(Clone)]
@@ -152,22 +157,36 @@ pub async fn build_state(config: AppConfig, clock: Arc<dyn Clock>) -> anyhow::Re
     let sessions = Arc::new(SessionRegistry::new());
     bus.start(sessions.clone());
     let hub_repo = Arc::new(PgHubRepository::new(db.app.clone()));
-    let adapters: Vec<Arc<dyn ChannelAdapter>> = vec![
-        Arc::new(SimWhatsAppAdapter::new(&config.hub_sim_whatsapp_app_secret, hub_repo.clone())),
-        Arc::new(SimSipAdapter::new(&config.hub_sim_sip_secret)),
-        Arc::new(WebChatAdapter),
-    ];
+    let wa = &config.whatsapp;
+    let provider = CloudProvider::parse(&wa.provider).ok_or_else(|| anyhow::anyhow!("unknown WHATSAPP_PROVIDER"))?;
+    let whatsapp = WhatsAppCloudAdapter::new(WhatsAppCloudConfig {
+        provider,
+        base_url: wa.base_url.clone(),
+        api_version: wa.api_version.clone(),
+        access_token: wa.access_token.clone(),
+        app_secret: wa.app_secret.clone(),
+    })
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let simulator: Option<Arc<dyn ProviderSimulator>> = match &wa.fake_control_url {
+        Some(url) => Some(Arc::new(FakeMetaClient::new(url, &wa.access_token).map_err(|e| anyhow::anyhow!(e.to_string()))?)),
+        None => None,
+    };
+    let adapters: Vec<Arc<dyn ChannelAdapter>> =
+        vec![Arc::new(whatsapp), Arc::new(SimSipAdapter::new(&config.hub_sim_sip_secret)), Arc::new(WebChatAdapter)];
     let hub = Arc::new(HubService::new(
         hub_repo,
         bus,
         Arc::new(M01TenantGate { pool: db.app.clone(), default_idle_minutes: config.default_session_idle_minutes }),
         adapters,
         config.node_id.clone(),
+        simulator,
     ));
+    hub.set_send_rate(wa.send_rate_per_sec);
     hub.connect_adapters().await.map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    tracing::info!(node = %config.node_id, bus = hub.bus.name(), "M10 hub ready");
+    tracing::info!(node = %config.node_id, bus = hub.bus.name(), whatsapp = provider.as_str(), whatsapp_api = %wa.base_url, "M10 hub ready");
 
     let db_max = config.db_max_connections as usize;
+    let meta_link = (provider == CloudProvider::Meta).then(|| MetaLink::new(config.whatsapp.clone()));
     let state = AppState(Arc::new(AppInner {
         config,
         db,
@@ -179,6 +198,7 @@ pub async fn build_state(config: AppConfig, clock: Arc<dyn Clock>) -> anyhow::Re
         hub,
         sessions,
         ws_admission: Arc::new(tokio::sync::Semaphore::new((db_max / 2).max(4))),
+        meta_link,
     }));
     if state.config.hub_demo_seed {
         // Several nodes may start together against an empty database: retry once after a
@@ -225,16 +245,27 @@ pub fn spawn_background(state: &AppState) {
 }
 
 /// Hub workers (every node runs them; row locks make them safe to run concurrently):
-/// outbound delivery, routing safety net, presence reaper, simulated-provider receipts (due rows
-/// in `hub.sim_callbacks`, processed by whichever node gets there first).
+/// outbound delivery, routing safety net, presence reaper.
 fn spawn_hub_workers(state: &AppState) {
+    if let Some(link) = &state.meta_link {
+        link.clone().spawn();
+    }
     let s = state.clone();
     tokio::spawn(async move {
         let mut t = tokio::time::interval(Duration::from_millis(250));
+        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             t.tick().await;
-            if let Err(e) = s.hub.delivery_tick().await {
-                e.log();
+            // Keep going while there is a backlog (full batches); otherwise wait for the tick.
+            loop {
+                match s.hub.delivery_tick().await {
+                    Ok(n) if n as i64 >= crate::modules::m10_hub::application::service::DELIVERY_BATCH => continue,
+                    Ok(_) => break,
+                    Err(e) => {
+                        e.log();
+                        break;
+                    }
+                }
             }
         }
     });
@@ -254,16 +285,6 @@ fn spawn_hub_workers(state: &AppState) {
         loop {
             t.tick().await;
             if let Err(e) = s.hub.reaper_tick().await {
-                e.log();
-            }
-        }
-    });
-    let s = state.clone();
-    tokio::spawn(async move {
-        let mut t = tokio::time::interval(Duration::from_millis(200));
-        loop {
-            t.tick().await;
-            if let Err(e) = s.hub.sim_callback_tick().await {
                 e.log();
             }
         }

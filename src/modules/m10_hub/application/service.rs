@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, Utc};
+use futures::StreamExt;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -21,12 +22,15 @@ use super::super::domain::{
     validate_body, CanonicalMessage, CanonicalStatus, Channel, ConversationStatus, Direction, MessageKind, Presence,
 };
 use super::ports::{
-    AgentView, Assignment, BusEnvelope, ChannelAdapter, ChannelHealth, ConversationView, CustomerSession, Endpoint, HubRepository, Inbound,
-    MessageView, RealtimeBus, StatusChange, Target,
+    AgentView, Assignment, BusEnvelope, ChannelAdapter, ChannelHealth, ConversationView, CustomerSession, Endpoint, FailureKind,
+    HubRepository, Inbound, MessageView, ProviderSimulator, RealtimeBus, StatusChange, Target,
 };
 
 /// Heartbeat freshness after which an agent counts as gone (node crash, closed laptop).
 pub const AGENT_STALE_SECS: i64 = 60;
+/// Outbound jobs leased per delivery round, and how many go to the provider at the same time.
+pub const DELIVERY_BATCH: i64 = 200;
+const DELIVERY_PARALLELISM: usize = 32;
 /// Messages replayed per conversation on (re)connect.
 pub const REPLAY_LIMIT: i64 = 200;
 const CUSTOMER_SESSION_HOURS: i64 = 24;
@@ -75,6 +79,11 @@ pub struct HubService {
     pub gate: Arc<dyn TenantGate>,
     adapters: HashMap<Channel, Arc<dyn ChannelAdapter>>,
     pub node_id: String,
+    /// fake-meta control API (WHATSAPP_PROVIDER=fake only): simulator console + load tests.
+    pub simulator: Option<Arc<dyn ProviderSimulator>>,
+    /// Outbound pacing per sending number (WhatsApp phone number id): never faster than the
+    /// provider's throughput tier, so we do not provoke 429s (and the DB churn of retrying them).
+    pacer: Pacer,
     endpoints: TtlCache<(Channel, String), Endpoint>,
     tenant_ok: TtlCache<Uuid, bool>,
 }
@@ -94,6 +103,7 @@ impl HubService {
         gate: Arc<dyn TenantGate>,
         adapters: Vec<Arc<dyn ChannelAdapter>>,
         node_id: String,
+        simulator: Option<Arc<dyn ProviderSimulator>>,
     ) -> Self {
         let adapters = adapters.into_iter().map(|a| (a.channel(), a)).collect();
         Self {
@@ -102,6 +112,8 @@ impl HubService {
             gate,
             adapters,
             node_id,
+            simulator,
+            pacer: Pacer::new(DEFAULT_SEND_RATE_PER_SEC),
             endpoints: TtlCache::new(ENDPOINT_CACHE_TTL),
             tenant_ok: TtlCache::new(TENANT_CACHE_TTL),
         }
@@ -417,41 +429,51 @@ impl HubService {
     /// Outbound delivery (OCC-M10-R032/R033): lease due jobs FIFO per conversation, deliver via
     /// the channel adapter, record the receipt or schedule a retry.
     pub async fn delivery_tick(&self) -> AppResult<usize> {
-        let jobs = self.repo.claim_outbound(30, 50).await?;
+        self.deliver_due(None).await
+    }
+
+    /// Delivers due outbound messages of one tenant only (targeted processing, e.g. tests that
+    /// share a database with other tenants' traffic).
+    pub async fn delivery_tick_for_tenant(&self, tenant: Uuid) -> AppResult<usize> {
+        self.deliver_due(Some(tenant)).await
+    }
+
+    async fn deliver_due(&self, tenant: Option<Uuid>) -> AppResult<usize> {
+        let jobs = self.repo.claim_outbound(30, DELIVERY_BATCH, tenant).await?;
         let n = jobs.len();
-        for job in jobs {
-            let adapter = self.adapter(job.channel)?;
-            let change = match adapter.deliver(&job).await {
-                Ok(provider_id) => {
-                    if adapter.simulated() {
-                        let payload = json!({ "to": job.customer_address, "from_endpoint": job.endpoint_address, "provider_message_id": provider_id, "text": job.body });
-                        let summary = format!("Fake BSP sent message to {}", job.customer_address);
-                        self.repo.sim_log(job.tenant_id, job.channel, "outbound", &summary, &payload).await?;
-                    }
-                    self.repo.outbound_sent(&job, &provider_id).await?
+        // A batch holds at most one job per conversation (the earliest still queued), so jobs can
+        // go out in parallel without breaking per-conversation order (OCC-M10-R033).
+        futures::stream::iter(jobs)
+            .for_each_concurrent(DELIVERY_PARALLELISM, |job| async move {
+                if let Err(e) = self.deliver_one(job).await {
+                    e.log();
                 }
-                Err(e) => {
-                    tracing::warn!(message_id = %job.message_id, attempt = job.attempts + 1, error = %e.0, "outbound delivery failed");
-                    self.repo.outbound_failed(&job, &e.0).await?
-                }
-            };
-            if let Some(ch) = change {
-                self.fan_out_status(&ch).await;
-            }
-        }
+            })
+            .await;
         Ok(n)
     }
 
-    /// Processes due SIMULATED provider callbacks (receipts) through the normal ingest path.
-    pub async fn sim_callback_tick(&self) -> AppResult<usize> {
-        let due = self.repo.claim_due_callbacks(100).await?;
-        let n = due.len();
-        for cb in due {
-            if let Err(e) = self.ingest_raw(cb.channel, Some(&cb.signature), &cb.body).await {
-                e.log();
+    /// Sets the outbound pace per sending number (messages per second).
+    pub fn set_send_rate(&self, per_sec: u32) {
+        self.pacer.set_rate(per_sec);
+    }
+
+    async fn deliver_one(&self, job: super::ports::OutboundJob) -> AppResult<()> {
+        let adapter = self.adapter(job.channel)?;
+        self.pacer.wait(&job.endpoint_address).await;
+        let change = match adapter.deliver(&job).await {
+            Ok(provider_id) => self.repo.outbound_sent(&job, &provider_id).await?,
+            Err(e) => {
+                if e.kind != FailureKind::Throttled {
+                    tracing::warn!(message_id = %job.message_id, attempt = job.attempts + 1, kind = ?e.kind, error = %e.message, "outbound delivery failed");
+                }
+                self.repo.outbound_failed(&job, &e.message, e.kind).await?
             }
+        };
+        if let Some(ch) = change {
+            self.fan_out_status(&ch).await;
         }
-        Ok(n)
+        Ok(())
     }
 
     /// Safety net for routing races: assign queued conversations an available agent could take.
@@ -486,7 +508,27 @@ impl HubService {
     // Admin
     // --------------------------------------------------------------------------------------------
 
-    /// Creates the SIMULATED WhatsApp number, voice DID and web-chat widget for a tenant.
+    /// Registers a WhatsApp business number (Cloud API phone number id) for a tenant. Idempotent
+    /// for the same tenant; refused when another tenant owns the number.
+    pub async fn connect_whatsapp_number(&self, tenant: Uuid, phone_number_id: &str, label: &str, skill: &str) -> AppResult<Endpoint> {
+        let id = phone_number_id.trim();
+        if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return Err(AppError::validation("phone_number_id", "Enter the phone number ID from WhatsApp → API Setup (digits)"));
+        }
+        if let Some(ep) = self.repo.resolve_endpoint(Channel::WhatsApp, id).await? {
+            return if ep.tenant_id == tenant {
+                Ok(ep)
+            } else {
+                Err(AppError::conflict("This WhatsApp number is already connected to another tenant"))
+            };
+        }
+        let simulated = self.adapter(Channel::WhatsApp)?.simulated();
+        self.repo.create_endpoint(tenant, Channel::WhatsApp, id, label, skill, simulated).await
+    }
+
+    /// Creates a WhatsApp number (fake-meta accepts any phone number id), a SIMULATED voice DID and
+    /// a web-chat widget for a tenant. With real Meta the WhatsApp number is connected separately
+    /// (`connect_whatsapp_number`), so only voice and web chat are created.
     pub async fn provision_simulated_channels(
         &self,
         tenant: Uuid,
@@ -494,21 +536,29 @@ impl HubService {
         voice_skill: &str,
         webchat_skill: &str,
     ) -> AppResult<Vec<Endpoint>> {
-        let wa = self
-            .create_unique_endpoint(tenant, Channel::WhatsApp, whatsapp_skill, |n| {
-                (format!("10960{n:010}"), format!("+60 3-{} {} (simulated WhatsApp)", n / 10_000 % 10_000, n % 10_000))
-            })
-            .await?;
-        let voice = self
-            .create_unique_endpoint(tenant, Channel::Voice, voice_skill, |n| {
+        let mut out = Vec::new();
+        if self.adapter(Channel::WhatsApp)?.simulated() {
+            out.push(
+                self.create_unique_endpoint(tenant, Channel::WhatsApp, whatsapp_skill, true, |n| {
+                    (format!("10960{n:010}"), format!("+60 3-{} {} (fake-meta WhatsApp)", n / 10_000 % 10_000, n % 10_000))
+                })
+                .await?,
+            );
+        }
+        out.push(
+            self.create_unique_endpoint(tenant, Channel::Voice, voice_skill, true, |n| {
                 let d = n % 100_000_000;
                 (format!("+603{d:08}"), format!("+60 3-{} {} (simulated DID)", d / 10_000, d % 10_000))
             })
-            .await?;
-        let chat = self
-            .create_unique_endpoint(tenant, Channel::WebChat, webchat_skill, |_| (random_token(24), "Website chat (demo widget)".into()))
-            .await?;
-        Ok(vec![wa, voice, chat])
+            .await?,
+        );
+        out.push(
+            self.create_unique_endpoint(tenant, Channel::WebChat, webchat_skill, false, |_| {
+                (random_token(24), "Website chat (demo widget)".into())
+            })
+            .await?,
+        );
+        Ok(out)
     }
 
     /// Random simulated address; retried on the (unlikely) collision with an existing endpoint.
@@ -517,18 +567,57 @@ impl HubService {
         tenant: Uuid,
         channel: Channel,
         skill: &str,
+        simulated: bool,
         make: impl Fn(u64) -> (String, String),
     ) -> AppResult<Endpoint> {
         let mut last = None;
         for _ in 0..5 {
             let (address, label) = make(rand::random::<u64>() % 10_000_000_000);
-            match self.repo.create_endpoint(tenant, channel, &address, &label, skill).await {
+            match self.repo.create_endpoint(tenant, channel, &address, &label, skill, simulated).await {
                 Ok(ep) => return Ok(ep),
                 Err(e) if e.code == crate::platform::errors::ErrorCode::Conflict => last = Some(e),
                 Err(e) => return Err(e),
             }
         }
         Err(last.unwrap_or_else(|| AppError::conflict("Could not allocate a free simulated address")))
+    }
+}
+
+/// Meta's base messaging tier: 80 messages per second per business number.
+pub const DEFAULT_SEND_RATE_PER_SEC: u32 = 80;
+
+/// Evenly spaced send slots per key (sending number). Each send reserves the next free slot and
+/// sleeps until it; nothing touches the database while waiting.
+struct Pacer {
+    interval_us: std::sync::atomic::AtomicU64,
+    next: Mutex<HashMap<String, Instant>>,
+}
+
+impl Pacer {
+    fn new(per_sec: u32) -> Self {
+        let p = Self { interval_us: std::sync::atomic::AtomicU64::new(0), next: Mutex::new(HashMap::new()) };
+        p.set_rate(per_sec);
+        p
+    }
+
+    fn set_rate(&self, per_sec: u32) {
+        self.interval_us.store(1_000_000 / u64::from(per_sec.max(1)), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    async fn wait(&self, key: &str) {
+        let interval = StdDuration::from_micros(self.interval_us.load(std::sync::atomic::Ordering::Relaxed));
+        let slot = {
+            let mut m = self.next.lock().unwrap_or_else(|e| e.into_inner());
+            let now = Instant::now();
+            let e = m.entry(key.to_string()).or_insert(now);
+            let slot = (*e).max(now);
+            *e = slot + interval;
+            if m.len() > 10_000 {
+                m.retain(|_, t| *t > now);
+            }
+            slot
+        };
+        tokio::time::sleep_until(tokio::time::Instant::from_std(slot)).await;
     }
 }
 

@@ -112,9 +112,9 @@ for target in dedicated-pg-my-central dedicated-mysql-my-central; do
   check "$target isolation smoke test" "$(echo "$R" | json '["data"]["isolation_check_status"]')" passed
 done
 
-echo "== M10 hub gateway (simulated WhatsApp + web chat over WebSockets; demo tenant)"
+echo "== M10 hub gateway (WhatsApp via fake-meta + web chat over WebSockets; demo tenant)"
 check "GET /ready reports the hub bus" "$(curl -s "$BASE/ready" | json '["hub"]["bus_ok"]')" True
-check "WhatsApp verify handshake" "$(curl -s "$BASE/v1/hub/channels/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=${HUB_SIM_WHATSAPP_VERIFY_TOKEN:-dev-sim-verify-token}&hub.challenge=4242")" 4242
+check "WhatsApp verify handshake" "$(curl -s "$BASE/v1/hub/channels/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=${WHATSAPP_VERIFY_TOKEN:-dev-verify-token}&hub.challenge=4242")" 4242
 check "unsigned WhatsApp webhook → 401" "$(status -X POST -H 'content-type: application/json' -d '{"object":"whatsapp_business_account","entry":[]}' "$BASE/v1/hub/channels/whatsapp/webhook")" 401
 # The WebSocket flow needs a real client: the hub_load tool (built on demand).
 HUB_LOAD="target/release/hub_load"

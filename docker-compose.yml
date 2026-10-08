@@ -68,6 +68,43 @@ services:
       timeout: 3s
       retries: 30
 
+  # Imitation of Meta's WhatsApp Cloud API (NOT WhatsApp) — used when WHATSAPP_PROVIDER=fake.
+  # Receives the hub's Graph API calls and posts signed webhooks back; generates bulk traffic.
+  fake-meta:
+    image: omni-m01-app:local
+    command: ["fake_meta"]
+    environment:
+      FAKE_META_BIND: 0.0.0.0:8090
+      FAKE_META_WEBHOOK_URL: ${FAKE_META_WEBHOOK_URL:-http://app:3000/v1/hub/channels/whatsapp/webhook}
+      FAKE_META_ACCESS_TOKEN: ${FAKE_META_ACCESS_TOKEN:-fake-meta-dev-token}
+      FAKE_META_APP_SECRET: ${FAKE_META_APP_SECRET:-fake-meta-dev-app-secret}
+      FAKE_META_RATE_PER_SEC: ${FAKE_META_RATE_PER_SEC:-80}
+      FAKE_META_LATENCY_MIN_MS: ${FAKE_META_LATENCY_MIN_MS:-20}
+      FAKE_META_LATENCY_MAX_MS: ${FAKE_META_LATENCY_MAX_MS:-80}
+      FAKE_META_ERROR_RATE: ${FAKE_META_ERROR_RATE:-0}
+      FAKE_META_DUPLICATE_RATE: ${FAKE_META_DUPLICATE_RATE:-0}
+      RUST_LOG: info
+    ports:
+      - "58090:8090"
+    restart: unless-stopped
+
+  # Public HTTPS address for real WhatsApp (Meta must reach the webhook). Enable ONE of them with
+  # COMPOSE_PROFILES in .env:  tunnel = cloudflared quick tunnel (no account; new address on every
+  # restart — the hub re-registers it in Meta automatically);  tunnel-ngrok = ngrok fixed domain
+  # (free account; NGROK_AUTHTOKEN + NGROK_DOMAIN).
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    command: ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "--url", "http://app:3000"]
+    restart: unless-stopped
+  tunnel-ngrok:
+    image: ngrok/ngrok:latest
+    profiles: ["tunnel-ngrok"]
+    command: ["http", "--url=${NGROK_DOMAIN:-missing-NGROK_DOMAIN}", "app:3000"]
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    restart: unless-stopped
+
   app: &app
     build: .
     image: omni-m01-app:local
@@ -79,6 +116,8 @@ services:
       MIGRATION_DATABASE_URL: postgres://crm_owner:${POSTGRES_OWNER_PASSWORD}@central-db:5432/omni_control
       TENANT_DB_TARGETS_FILE: /app/config/tenant-db-targets.toml
       REDIS_URL: redis://redis:6379
+      FAKE_META_URL: http://fake-meta:8090
+      TUNNEL_METRICS_URL: http://tunnel:2000
       NODE_ID: app
       DATA_DIR: /app/data
       LOG_FORMAT: json
@@ -95,6 +134,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      fake-meta:
+        condition: service_started
     restart: unless-stopped
 
   # ---- profile "cluster": two hub nodes + nginx load balancer (WebSocket upgrade) on :8080 ----

@@ -99,7 +99,7 @@ impl ChannelAdapter for SimSipAdapter {
     }
 
     async fn deliver(&self, _job: &OutboundJob) -> Result<String, DeliveryError> {
-        Err(DeliveryError("voice has no outbound text messages".into()))
+        Err(DeliveryError::permanent("voice has no outbound text messages".into()))
     }
 
     async fn health(&self) -> ChannelHealth {

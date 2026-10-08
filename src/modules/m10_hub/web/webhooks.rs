@@ -1,6 +1,7 @@
-//! Provider-facing endpoints of the SIMULATED channels (ADR-0012). They authenticate with HMAC
-//! signatures over the raw body; the tenant is resolved from the endpoint registry inside the
-//! hub service — never from the payload.
+//! Provider-facing endpoints: the WhatsApp Cloud API webhook (real Meta or fake-meta, ADR-0013)
+//! and the SIMULATED SBC event feed (ADR-0012). They authenticate with HMAC signatures over the
+//! raw body; the tenant is resolved from the endpoint registry inside the hub service — never
+//! from the payload. Meta's webhook dashboard needs the GET verification handshake.
 
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -36,7 +37,7 @@ struct VerifyQuery {
 /// Meta-style subscription handshake: echo `hub.challenge` when the verify token matches.
 async fn whatsapp_verify(State(state): State<AppState>, Query(q): Query<VerifyQuery>) -> Response {
     let ok = q.mode.as_deref() == Some("subscribe")
-        && q.token.as_deref().is_some_and(|t| constant_time_eq(t.as_bytes(), state.config.hub_sim_whatsapp_verify_token.as_bytes()));
+        && q.token.as_deref().is_some_and(|t| constant_time_eq(t.as_bytes(), state.config.whatsapp.verify_token.as_bytes()));
     match (ok, q.challenge) {
         (true, Some(c)) => c.chars().take(200).collect::<String>().into_response(),
         _ => AppError::forbidden("Verification failed").into_response(),

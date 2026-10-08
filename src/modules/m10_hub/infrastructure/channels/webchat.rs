@@ -31,7 +31,7 @@ impl ChannelAdapter for WebChatAdapter {
     }
 
     async fn deliver(&self, _job: &OutboundJob) -> Result<String, DeliveryError> {
-        Err(DeliveryError("web chat replies are pushed over the customer WebSocket, not queued".into()))
+        Err(DeliveryError::permanent("web chat replies are pushed over the customer WebSocket, not queued".into()))
     }
 
     async fn health(&self) -> ChannelHealth {

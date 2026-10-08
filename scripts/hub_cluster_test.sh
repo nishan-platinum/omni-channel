@@ -18,6 +18,11 @@ P="docker compose --profile cluster"
 
 echo "== Starting the cluster (app1, app2, nginx)"
 $P up -d app1 app2 lb >/dev/null
+# The cluster nodes share the database with the main `app`: left running, they would keep claiming
+# its outbound jobs (with whatever WhatsApp provider .env had during the test). Stop them on exit;
+# KEEP_CLUSTER=1 leaves them up for inspection.
+cleanup() { [ "${KEEP_CLUSTER:-0}" = 1 ] || $P stop app1 app2 lb >/dev/null 2>&1 || true; }
+trap cleanup EXIT
 wait_ready() {
   for _ in $(seq 1 60); do
     if $P exec -T "$1" bash -c ': </dev/tcp/127.0.0.1/3000' 2>/dev/null; then

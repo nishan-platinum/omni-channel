@@ -5,7 +5,8 @@
 //! * tenant `demo` (Standard plan, active) with Tenant Admin `admin@demo.omni.local`
 //! * agents `agent.sales@demo.omni.local` (sales), `agent.support@demo.omni.local` (support),
 //!   `agent.lead@demo.omni.local` (sales + support)
-//! * SIMULATED WhatsApp number (→ support), voice DID (→ support) and web-chat widget (→ sales)
+//! * WhatsApp number on the fake-meta server (→ support; with WHATSAPP_PROVIDER=meta the configured
+//!   Meta phone number id is connected instead), simulated voice DID (→ support), web-chat widget (→ sales)
 //!
 //! All demo users share `HUB_DEMO_PASSWORD` (default documented in `.env.example`). Idempotent:
 //! nothing is created twice.
@@ -49,8 +50,20 @@ pub async fn seed(state: &AppState) -> anyhow::Result<()> {
             out.tenant.id.0
         }
     };
-    if !state.hub.repo.endpoints(tenant).await.map_err(err)?.is_empty() {
-        return Ok(()); // already seeded
+    // Real WhatsApp (WHATSAPP_PROVIDER=meta): route the configured Meta number to the demo tenant.
+    if !state.config.whatsapp.is_fake() {
+        if let Some(pnid) = &state.config.whatsapp.phone_number_id {
+            let label = state.config.whatsapp.display_number.clone().unwrap_or_else(|| "Meta WhatsApp number".into());
+            match state.hub.connect_whatsapp_number(tenant, pnid, &format!("{label} (real WhatsApp)"), "support").await {
+                Ok(_) => tracing::info!(tenant_code = DEMO_CODE, "Meta WhatsApp number connected to the demo tenant"),
+                Err(e) => tracing::warn!(error = %e, "could not connect the Meta WhatsApp number to the demo tenant"),
+            }
+        }
+    }
+    // Already seeded once the simulated voice / web-chat channels exist.
+    if state.hub.repo.endpoints(tenant).await.map_err(err)?.iter().any(|e| e.channel != crate::modules::m10_hub::domain::Channel::WhatsApp)
+    {
+        return Ok(());
     }
     // Tenant Admin: accept the (re-issued) invitation with the demo password.
     let (_, token) = state.auth.invite_tenant_admin(tenant, DEMO_ADMIN, "Demo Tenant Admin").await.map_err(err)?;

@@ -145,14 +145,6 @@ pub struct SimLogEntry {
     pub created_at: DateTime<Utc>,
 }
 
-/// A provider webhook scheduled for later (the SIMULATED BSP's receipts; ADR-0012).
-#[derive(Debug, Clone)]
-pub struct ProviderCallback {
-    pub channel: Channel,
-    pub signature: String,
-    pub body: Vec<u8>,
-}
-
 /// Re-queued work for an agent whose heartbeat stopped.
 #[derive(Debug, Clone)]
 pub struct ReapedAgent {
@@ -170,8 +162,15 @@ pub trait HubRepository: Send + Sync {
     // Endpoints (tenant resolution for inbound traffic)
     async fn resolve_endpoint(&self, channel: Channel, address: &str) -> AppResult<Option<Endpoint>>;
     async fn endpoints(&self, tenant: Uuid) -> AppResult<Vec<Endpoint>>;
-    async fn create_endpoint(&self, tenant: Uuid, channel: Channel, address: &str, label: &str, default_skill: &str)
-        -> AppResult<Endpoint>;
+    async fn create_endpoint(
+        &self,
+        tenant: Uuid,
+        channel: Channel,
+        address: &str,
+        label: &str,
+        default_skill: &str,
+        simulated: bool,
+    ) -> AppResult<Endpoint>;
 
     // Agents & presence
     async fn upsert_agent(&self, tenant: Uuid, user_id: Uuid, skills: &[String], max_concurrent: i64) -> AppResult<()>;
@@ -209,9 +208,10 @@ pub trait HubRepository: Send + Sync {
     async fn routable_queued(&self, limit: i64) -> AppResult<Vec<(Uuid, Uuid)>>;
 
     // Outbound delivery & receipts
-    async fn claim_outbound(&self, lease_secs: i64, limit: i64) -> AppResult<Vec<OutboundJob>>;
+    /// Leases due outbound jobs; `tenant` restricts the lease to one tenant (targeted processing).
+    async fn claim_outbound(&self, lease_secs: i64, limit: i64, tenant: Option<Uuid>) -> AppResult<Vec<OutboundJob>>;
     async fn outbound_sent(&self, job: &OutboundJob, provider_message_id: &str) -> AppResult<Option<StatusChange>>;
-    async fn outbound_failed(&self, job: &OutboundJob, error: &str) -> AppResult<Option<StatusChange>>;
+    async fn outbound_failed(&self, job: &OutboundJob, error: &str, kind: FailureKind) -> AppResult<Option<StatusChange>>;
     async fn apply_status(&self, status: &CanonicalStatus) -> AppResult<Option<StatusChange>>;
     async fn mark_read_up_to(&self, tenant: Uuid, conversation: Uuid, seq: i64) -> AppResult<Vec<StatusChange>>;
 
@@ -225,9 +225,6 @@ pub trait HubRepository: Send + Sync {
         expires_at: DateTime<Utc>,
     ) -> AppResult<Uuid>;
     async fn customer_session(&self, token_hash: &[u8]) -> AppResult<Option<CustomerSession>>;
-
-    /// Takes simulated provider callbacks that are due (each is handed to exactly one caller).
-    async fn claim_due_callbacks(&self, limit: i64) -> AppResult<Vec<ProviderCallback>>;
 
     // Simulator console log (SIMULATED providers only)
     async fn sim_log(&self, tenant: Uuid, channel: Channel, direction: &str, summary: &str, payload: &Value) -> AppResult<()>;
@@ -286,8 +283,37 @@ pub struct ChannelHealth {
     pub detail: String,
 }
 
+/// How a delivery failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// Platform hiccup: retry ladder (1 m / 5 m / 30 m, then failed).
+    Transient,
+    /// Bad recipient, closed 24-hour window, locked account, bad credentials: fail at once.
+    Permanent,
+    /// Provider throughput limit (e.g. WhatsApp 130429): retry in about a second; does not count
+    /// as an attempt.
+    Throttled,
+}
+
 #[derive(Debug, Clone)]
-pub struct DeliveryError(pub String);
+pub struct DeliveryError {
+    pub message: String,
+    pub kind: FailureKind,
+}
+
+impl DeliveryError {
+    pub fn retryable(message: String) -> Self {
+        Self { message, kind: FailureKind::Transient }
+    }
+
+    pub fn permanent(message: String) -> Self {
+        Self { message, kind: FailureKind::Permanent }
+    }
+
+    pub fn throttled(message: String) -> Self {
+        Self { message, kind: FailureKind::Throttled }
+    }
+}
 
 #[async_trait]
 pub trait ChannelAdapter: Send + Sync {
@@ -303,4 +329,20 @@ pub trait ChannelAdapter: Send + Sync {
     async fn health(&self) -> ChannelHealth;
     /// backfill: fetch events missed while disconnected (simulators have none).
     async fn backfill(&self, since: DateTime<Utc>) -> AppResult<Vec<Inbound>>;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Provider simulator (fake-meta control API; development + load tests only, ADR-0013)
+// ------------------------------------------------------------------------------------------------
+
+#[async_trait]
+pub trait ProviderSimulator: Send + Sync {
+    fn label(&self) -> String;
+    /// A simulated customer sends a WhatsApp text to `phone_number_id` (arrives as a signed webhook).
+    async fn customer_message(&self, phone_number_id: &str, from: &str, name: &str, text: &str) -> AppResult<String>;
+    async fn start_load(&self, phone_number_id: &str, customers: u64, messages_per_customer: u64, rate_per_sec: u64) -> AppResult<Value>;
+    async fn stats(&self) -> AppResult<Value>;
+    async fn reset(&self) -> AppResult<()>;
+    /// Messages the simulated customers' phones received (latest first).
+    async fn outbox(&self, phone_number_id: Option<&str>, limit: usize) -> AppResult<Value>;
 }

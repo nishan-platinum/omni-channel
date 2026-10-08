@@ -18,8 +18,9 @@ npm build pipelines, `composer.json`, `artisan`, `*.php`. Laravel/Angular mentio
 historical — translate them (see `docs/decisions/ADR-0001-rust-stack-and-ssr.md`).
 
 ## Scope
-M01 (P1 + P2) and the M10 hub gateway slice (`src/modules/m10_hub/`, ADR-0011). WhatsApp and SIP are
-**SIMULATED** channel adapters (ADR-0012) — there are no real provider credentials; never claim otherwise.
+M01 (P1 + P2) and the M10 hub gateway slice (`src/modules/m10_hub/`, ADR-0011). WhatsApp: real Cloud API
+adapter; `WHATSAPP_PROVIDER=meta` (real Meta) or `fake` (fake-meta server, NOT WhatsApp; bulk tests) —
+ADR-0013. Voice: **SIMULATED** SBC feed (ADR-0012). Never claim a fake/simulator is real.
 Other modules (M02, M13, M19, M21, M23, M25, M29, M30 …) are **ports + clearly-labelled reference
 adapters** in `src/modules/m01_tenancy/infrastructure/adapters.rs` (+ `tenant_data/targets.rs`, `gate.rs`).
 Never claim a stub or simulator is a production integration.

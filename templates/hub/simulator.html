@@ -1,12 +1,16 @@
 {% extends "layouts/base.html" %}
 {% block content %}
 <h1>Channel simulator <span class="tag">simulated</span></h1>
-<p class="help">Plays the part of WhatsApp (Meta/BSP) and the telco SBC, so the gateway can be tested without real credentials. Every request below is signed and sent through exactly the same webhook code path a real provider would use. Open the <a href="/agent" target="_blank" rel="noopener">agent desktop</a> in another browser (signed in as an agent) to watch messages arrive.</p>
+<p class="help">Plays the customers' side. WhatsApp goes through <strong>{{ whatsapp_label }}</strong> using the real WhatsApp Cloud API integration; voice is a simulated SBC feed. Open the <a href="/agent" target="_blank" rel="noopener">agent desktop</a> in another browser (signed in as an agent) to watch messages arrive.</p>
+
+{% include "hub/_meta_status.html" %}
 
 <div class="grid2">
   <section class="card">
     <h2>WhatsApp: customer sends a message</h2>
-    {% if whatsapp.is_empty() %}<p class="empty">No WhatsApp number yet — create the simulated channels on the <a href="/hub/admin">hub page</a>.</p>{% else %}
+    <p class="help">Provider: <strong>{{ whatsapp_label }}</strong>{% if fake_whatsapp %} <span class="tag">fake-meta — not WhatsApp</span>{% else %} <span class="tag">real WhatsApp</span>{% endif %}</p>
+    {% if whatsapp.is_empty() %}<p class="empty">No WhatsApp number yet — {% if fake_whatsapp %}create the channels{% else %}connect your Meta phone number ID{% endif %} on the <a href="/hub/admin">hub page</a>.</p>
+    {% else if fake_whatsapp %}
     <form method="post" action="/hub/simulator/whatsapp" class="form">
       <input type="hidden" name="_csrf" value="{{ page.csrf }}">
       <label for="w-ep">To our WhatsApp number</label>
@@ -19,7 +23,10 @@
       <textarea id="w-text" name="text" rows="3" maxlength="4096" required>Hi, my fibre connection is down since this morning.</textarea>
       <button class="btn btn-primary" type="submit">Send WhatsApp message</button>
     </form>
-    <p class="help small">Agent replies to WhatsApp conversations go to a fake BSP, which then reports <em>delivered</em> and <em>read</em> back through the signed webhook. A reply containing <code>[fail]</code> makes the fake BSP fail, so you can see the retry ladder (1 min / 5 min / 30 min, then failed).</p>
+    <p class="help small">fake-meta sends Meta's signed webhook to the hub over HTTP. Agent replies go to fake-meta's copy of the Graph API, which answers with <em>sent → delivered → read</em> webhooks. In a reply, <code>[fail]</code> → permanent error 131026, <code>[retry]</code> → transient error 131000 (retry ladder). Replies to a number that never wrote first are refused with 131047 (24-hour window), like real WhatsApp.</p>
+    {% else %}
+    <p>Real WhatsApp is connected. From a phone that is on your Meta test-recipient list, send a WhatsApp message to <strong>{{ display_number }}</strong>; it appears on the agent desktop. Agent replies arrive on that phone.</p>
+    <p class="help small">Meta must reach <code>{{ webhook_url }}</code> over public HTTPS (e.g. an ngrok/cloudflared tunnel to this server); set that URL and your <code>WHATSAPP_VERIFY_TOKEN</code> in Meta → WhatsApp → Configuration → Webhook, and subscribe to <em>messages</em>.</p>
     {% endif %}
   </section>
 
@@ -42,6 +49,23 @@
     {% endif %}
   </section>
 </div>
+
+{% if fake_whatsapp && !whatsapp.is_empty() %}
+<section class="card" id="load">
+  <h2>WhatsApp bulk load (fake-meta)</h2>
+  <p class="help">Many fake customers write to the chosen number within a short time; fake-meta delivers each message as a signed webhook and measures how fast the hub acknowledges it. Use a number routed to a skill your load-test agents have (the <code>hub_load whatsapp</code> tool creates such agents and replies automatically, which also measures the full round trip).</p>
+  <form method="post" action="/hub/simulator/whatsapp/load" class="form inline-form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <label for="l-ep">Number</label>
+    <select id="l-ep" name="endpoint">{% for e in whatsapp %}<option value="{{ e.id }}">{{ e.label }} → {{ e.default_skill }}</option>{% endfor %}</select>
+    <label for="l-c">Customers</label><input id="l-c" name="customers" value="200" class="num" inputmode="numeric">
+    <label for="l-m">Messages each</label><input id="l-m" name="messages" value="5" class="num" inputmode="numeric">
+    <label for="l-r">Messages / second</label><input id="l-r" name="rate" value="200" class="num" inputmode="numeric">
+    <button class="btn btn-primary" type="submit">Start load run</button>
+  </form>
+  <div hx-get="/hub/simulator/whatsapp/live" hx-trigger="load, every 2s" hx-swap="innerHTML"><p class="help">Loading statistics…</p></div>
+</section>
+{% endif %}
 
 <section class="card">
   <h2>Web chat (customer side)</h2>

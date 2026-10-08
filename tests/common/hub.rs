@@ -1,5 +1,6 @@
-//! M10 hub test helpers: a real HTTP server on an ephemeral port (WebSockets need a socket), a
-//! tenant with simulated channels and agents, WebSocket clients and signed webhook calls.
+//! M10 hub test helpers: a real HTTP server on an ephemeral port (WebSockets need a socket), an
+//! in-process **fake-meta** server (the hub's real WhatsApp Cloud API adapter talks to it over
+//! HTTP and it posts signed webhooks back), a tenant with channels and agents, WebSocket clients.
 #![allow(dead_code)]
 
 use std::time::Duration;
@@ -13,7 +14,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
 
-use omni_m01::modules::m10_hub::infrastructure::channels::{sign, whatsapp_sim};
+use omni_m01::fake_meta::{FakeMeta, FakeMetaConfig};
+use omni_m01::modules::m10_hub::infrastructure::channels::{sign, whatsapp};
 
 use super::{TestApp, PLAN_STANDARD};
 
@@ -34,20 +36,50 @@ pub struct HubTenant {
 pub struct HubApp {
     pub app: TestApp,
     pub addr: std::net::SocketAddr,
+    pub fake_meta: std::net::SocketAddr,
     pub sa: String,
 }
 
+pub const FAKE_TOKEN: &str = "test-fake-meta-token";
+pub const FAKE_SECRET: &str = "test-fake-meta-app-secret";
+
 impl HubApp {
     pub async fn new() -> Self {
-        let app = TestApp::new().await;
+        // Hub listener first (fake-meta needs its webhook URL), then fake-meta, then the app.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let fake_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fake_addr = fake_listener.local_addr().unwrap();
+        let fake = FakeMeta::start(FakeMetaConfig {
+            access_token: FAKE_TOKEN.into(),
+            app_secret: FAKE_SECRET.into(),
+            webhook_url: format!("http://{addr}/v1/hub/channels/whatsapp/webhook"),
+            latency_ms: (1, 5),
+            rate_per_sec: 1000,
+            delivered_after_ms: 100,
+            read_after_ms: 250,
+            webhook_workers: 16,
+            ..Default::default()
+        });
+        tokio::spawn(async move {
+            axum::serve(fake_listener, omni_m01::fake_meta::router(fake)).await.unwrap();
+        });
+        let app = TestApp::with_config(|cfg| {
+            let url = format!("http://{fake_addr}");
+            cfg.whatsapp.provider = "fake".into();
+            cfg.whatsapp.base_url = url.clone();
+            cfg.whatsapp.fake_control_url = Some(url);
+            cfg.whatsapp.access_token = FAKE_TOKEN.into();
+            cfg.whatsapp.app_secret = FAKE_SECRET.into();
+            cfg.whatsapp.verify_token = "test-verify-token".into();
+        })
+        .await;
         let router = app.router.clone();
         tokio::spawn(async move {
             axum::serve(listener, router.into_make_service()).await.unwrap();
         });
         let sa = app.sa_token().await;
-        Self { app, addr, sa }
+        Self { app, addr, fake_meta: fake_addr, sa }
     }
 
     /// Active Standard tenant + Tenant Admin + simulated channels (WhatsApp/voice → support,
@@ -114,10 +146,18 @@ impl HubApp {
         (ws, w)
     }
 
-    /// Signed simulated WhatsApp inbound webhook. Returns (status, body).
+    /// A customer message delivered the way fake-meta (or Meta) does it: a signed webhook over
+    /// HTTP, asynchronously. Also opens the 24-hour window in fake-meta, so replies are accepted.
+    pub async fn customer_writes(&self, phone_number_id: &str, from: &str, text: &str) {
+        let sim = self.app.state.hub.simulator.clone().expect("fake-meta client");
+        sim.customer_message(phone_number_id, from, "Customer", text).await.expect("fake-meta inbound");
+    }
+
+    /// Signed WhatsApp webhook posted straight to the hub (synchronous; for signature,
+    /// duplicate and ordering checks). fake-meta does not know about it (no 24-hour window).
     pub async fn whatsapp_inbound(&self, phone_number_id: &str, from: &str, text: &str, wamid: &str) -> (StatusCode, Value) {
-        let body = whatsapp_sim::inbound_payload(phone_number_id, from, "Customer", text, wamid).to_string();
-        let sig = sign(self.app.state.config.hub_sim_whatsapp_app_secret.as_bytes(), body.as_bytes());
+        let body = whatsapp::inbound_payload(phone_number_id, from, "Customer", text, wamid).to_string();
+        let sig = sign(FAKE_SECRET.as_bytes(), body.as_bytes());
         self.raw_post("/v1/hub/channels/whatsapp/webhook", &body, &[("x-hub-signature-256", &sig)]).await
     }
 
@@ -136,12 +176,11 @@ impl HubApp {
         (r.status, r.body)
     }
 
-    /// Delivery worker + simulated receipts, until `done` holds (other nodes running against the
-    /// same database may process the queue too, so the outcome is polled, not assumed).
-    pub async fn pump_until<F: Fn(&Value) -> bool>(&self, token: &str, conversation: &str, done: F) -> Value {
-        for _ in 0..80 {
-            self.app.state.hub.delivery_tick().await.expect("delivery tick");
-            self.app.state.hub.sim_callback_tick().await.expect("simulated callback tick");
+    /// Runs this tenant's delivery worker until `done` holds for the conversation's timeline.
+    /// Receipts come back from fake-meta as real webhooks.
+    pub async fn pump_until<F: Fn(&Value) -> bool>(&self, tenant: Uuid, token: &str, conversation: &str, done: F) -> Value {
+        for _ in 0..100 {
+            self.app.state.hub.delivery_tick_for_tenant(tenant).await.expect("delivery tick");
             let r = self.app.get(&format!("/v1/hub/conversations/{conversation}/messages"), token).await;
             if done(r.data()) {
                 return r.data().clone();
@@ -149,6 +188,12 @@ impl HubApp {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         panic!("condition not reached for conversation {conversation}");
+    }
+
+    /// What fake-meta's "customer phones" received (latest first).
+    pub async fn fake_outbox(&self, phone_number_id: &str) -> Vec<Value> {
+        let sim = self.app.state.hub.simulator.clone().expect("fake-meta client");
+        sim.outbox(Some(phone_number_id), 50).await.expect("outbox").as_array().cloned().unwrap_or_default()
     }
 }
 

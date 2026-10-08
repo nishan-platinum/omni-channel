@@ -428,7 +428,7 @@ mod hub_isolation {
         let t: Uuid = row.try_get("tenant_id").unwrap();
         assert_eq!(t, x.b.tenant_id);
         // A payload cannot smuggle a tenant: unknown fields are ignored, the number decides.
-        let mut body = omni_m01::modules::m10_hub::infrastructure::channels::whatsapp_sim::inbound_payload(
+        let mut body = omni_m01::modules::m10_hub::infrastructure::channels::whatsapp::inbound_payload(
             &x.b.whatsapp,
             "60190000002",
             "Z",
@@ -437,10 +437,7 @@ mod hub_isolation {
         );
         body["tenant_id"] = json!(x.a.tenant_id);
         let raw = body.to_string();
-        let sig = omni_m01::modules::m10_hub::infrastructure::channels::sign(
-            x.h.app.state.config.hub_sim_whatsapp_app_secret.as_bytes(),
-            raw.as_bytes(),
-        );
+        let sig = omni_m01::modules::m10_hub::infrastructure::channels::sign(FAKE_SECRET.as_bytes(), raw.as_bytes());
         let (st, _) = x.h.raw_post("/v1/hub/channels/whatsapp/webhook", &raw, &[("x-hub-signature-256", &sig)]).await;
         assert_eq!(st, StatusCode::OK);
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM hub.conversations WHERE tenant_id = $1 AND customer_address = '60190000002'")

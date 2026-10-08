@@ -77,9 +77,8 @@ pub struct AppConfig {
     pub redis_url: Option<String>,
     /// M10 hub: this node's id (presence ownership, logs, /ready).
     pub node_id: String,
-    /// SIMULATED WhatsApp BSP app secret (X-Hub-Signature-256) and webhook verify token.
-    pub hub_sim_whatsapp_app_secret: String,
-    pub hub_sim_whatsapp_verify_token: String,
+    /// WhatsApp Cloud API (ADR-0013): `fake` → the fake-meta server, `meta` → graph.facebook.com.
+    pub whatsapp: WhatsAppSettings,
     /// SIMULATED SBC event-feed signing secret.
     pub hub_sim_sip_secret: String,
     /// Development only: seed the `demo` tenant, agents and simulated channels at start-up.
@@ -109,7 +108,9 @@ impl fmt::Debug for AppConfig {
             .field("platform_domain", &self.platform_domain)
             .field("redis_url", &self.redis_url.as_deref().map(redact_url))
             .field("node_id", &self.node_id)
-            .field("hub_sim_secrets", &"<redacted>")
+            .field("whatsapp_provider", &self.whatsapp.provider)
+            .field("whatsapp_base_url", &self.whatsapp.base_url)
+            .field("hub_secrets", &"<redacted>")
             .field("hub_demo_seed", &self.hub_demo_seed)
             .finish_non_exhaustive()
     }
@@ -154,6 +155,96 @@ fn parse_bool(name: &str, default: bool) -> anyhow::Result<bool> {
             other => Err(anyhow!("invalid boolean for {name}: {other}")),
         },
         None => Ok(default),
+    }
+}
+
+/// WhatsApp channel settings. Each provider has its own credentials so real Meta secrets are never
+/// sent to the fake server (and vice versa).
+#[derive(Clone)]
+pub struct WhatsAppSettings {
+    /// `fake` (default) or `meta`.
+    pub provider: String,
+    /// Graph API base URL: `FAKE_META_URL` for fake, `WHATSAPP_GRAPH_BASE_URL` (default
+    /// https://graph.facebook.com) for meta.
+    pub base_url: String,
+    pub api_version: String,
+    pub access_token: String,
+    pub app_secret: String,
+    /// Webhook subscription handshake token (`hub.verify_token`), configured in Meta's dashboard.
+    pub verify_token: String,
+    /// Business phone number id (real Meta: from WhatsApp → API Setup). The development demo
+    /// tenant gets a channel endpoint for it.
+    pub phone_number_id: Option<String>,
+    pub display_number: Option<String>,
+    /// fake-meta control API (simulator console, load tests); only with the fake provider.
+    pub fake_control_url: Option<String>,
+    /// Meta App ID and WhatsApp Business Account ID: with both set (provider `meta`) the hub
+    /// registers its own webhook in Meta at startup — no manual webhook settings (ADR-0013).
+    pub app_id: Option<String>,
+    pub business_account_id: Option<String>,
+    /// Public https base URL Meta should call. Explicit value, else `https://NGROK_DOMAIN`, else
+    /// discovered from the cloudflared quick tunnel (`TUNNEL_METRICS_URL`/quicktunnel).
+    pub public_base_url: Option<String>,
+    pub tunnel_metrics_url: Option<String>,
+    /// Outbound messages per second per sending number (Meta tiers: 80 base, up to 1000).
+    pub send_rate_per_sec: u32,
+}
+
+impl WhatsAppSettings {
+    pub fn is_fake(&self) -> bool {
+        self.provider == "fake"
+    }
+
+    fn from_env() -> anyhow::Result<Self> {
+        let provider = var_or("WHATSAPP_PROVIDER", "fake").to_ascii_lowercase();
+        let api_version = var_or("WHATSAPP_GRAPH_API_VERSION", "v25.0");
+        let verify_token = var_or("WHATSAPP_VERIFY_TOKEN", "dev-verify-token");
+        let phone_number_id = var("WHATSAPP_PHONE_NUMBER_ID");
+        let display_number = var("WHATSAPP_DISPLAY_NUMBER");
+        let app_id = var("WHATSAPP_APP_ID");
+        let business_account_id = var("WHATSAPP_BUSINESS_ACCOUNT_ID");
+        let public_base_url = var("WHATSAPP_PUBLIC_BASE_URL")
+            .or_else(|| var("NGROK_DOMAIN").map(|d| format!("https://{}", d.trim_start_matches("https://"))));
+        let tunnel_metrics_url = var("TUNNEL_METRICS_URL");
+        let send_rate_per_sec = parse_var("WHATSAPP_SEND_RATE_PER_SEC", 80u32)?.clamp(1, 10_000);
+        match provider.as_str() {
+            "fake" => {
+                let url = var_or("FAKE_META_URL", "http://localhost:58090");
+                Ok(Self {
+                    provider,
+                    base_url: url.clone(),
+                    api_version,
+                    access_token: var_or("FAKE_META_ACCESS_TOKEN", "fake-meta-dev-token"),
+                    app_secret: var_or("FAKE_META_APP_SECRET", "fake-meta-dev-app-secret"),
+                    verify_token,
+                    phone_number_id,
+                    display_number,
+                    fake_control_url: Some(url),
+                    app_id,
+                    business_account_id,
+                    public_base_url,
+                    tunnel_metrics_url,
+                    send_rate_per_sec,
+                })
+            }
+            "meta" => Ok(Self {
+                provider,
+                base_url: var_or("WHATSAPP_GRAPH_BASE_URL", "https://graph.facebook.com"),
+                api_version,
+                access_token: var("WHATSAPP_ACCESS_TOKEN").context("WHATSAPP_PROVIDER=meta needs WHATSAPP_ACCESS_TOKEN")?,
+                app_secret: var("WHATSAPP_APP_SECRET").context("WHATSAPP_PROVIDER=meta needs WHATSAPP_APP_SECRET")?,
+                verify_token,
+                phone_number_id: Some(phone_number_id.context("WHATSAPP_PROVIDER=meta needs WHATSAPP_PHONE_NUMBER_ID")?),
+                display_number,
+                fake_control_url: None,
+                app_id,
+                business_account_id,
+                public_base_url,
+                tunnel_metrics_url,
+                send_rate_per_sec,
+            }),
+            other => Err(anyhow!("WHATSAPP_PROVIDER must be fake or meta, got {other}")),
+        }
     }
 }
 
@@ -212,8 +303,7 @@ impl AppConfig {
             node_id: var("NODE_ID")
                 .or_else(|| var("HOSTNAME"))
                 .unwrap_or_else(|| format!("node-{}", &uuid::Uuid::new_v4().simple().to_string()[..8])),
-            hub_sim_whatsapp_app_secret: var_or("HUB_SIM_WHATSAPP_APP_SECRET", "dev-sim-whatsapp-app-secret-change-me"),
-            hub_sim_whatsapp_verify_token: var_or("HUB_SIM_WHATSAPP_VERIFY_TOKEN", "dev-sim-verify-token"),
+            whatsapp: WhatsAppSettings::from_env()?,
             hub_sim_sip_secret: var_or("HUB_SIM_SIP_SECRET", "dev-sim-sip-secret-change-me"),
             hub_demo_seed: parse_bool("HUB_DEMO_SEED", false)? && app_env.is_development(),
             hub_demo_password: var("HUB_DEMO_PASSWORD"),

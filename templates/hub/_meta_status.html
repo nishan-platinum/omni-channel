@@ -1,0 +1,21 @@
+{% if let Some(m) = meta %}
+<section class="card {% if m.all_ok() %}highlight{% endif %}" id="meta-status">
+  <h2>Real WhatsApp (Meta) connection
+    {% if m.all_ok() %}<span class="badge badge-ok">ready</span>{% else %}<span class="badge badge-warn">action needed</span>{% endif %}</h2>
+  <table class="compact"><tbody>
+    <tr><th scope="row">1. Token &amp; phone number</th>
+      <td>{% if let Some(s) = m.number %}<span class="badge {% if s.ok %}badge-ok{% else %}badge-bad{% endif %}">{% if s.ok %}ok{% else %}failed{% endif %}</span> {{ s.detail }}{% else %}<span class="badge badge-muted">checking…</span>{% endif %}</td></tr>
+    <tr><th scope="row">2. Public address (tunnel)</th>
+      <td>{% if let Some(u) = m.callback_url %}<span class="badge badge-ok">ok</span> <code>{{ u }}</code>{% else %}<span class="badge badge-bad">none</span> No public HTTPS address yet. Put <code>COMPOSE_PROFILES=tunnel</code> in <code>.env</code> and run <code>docker compose up -d</code> (or set <code>WHATSAPP_PUBLIC_BASE_URL</code>).{% endif %}</td></tr>
+    <tr><th scope="row">3. Webhook registered in Meta</th>
+      <td>{% if let Some(s) = m.webhook %}<span class="badge {% if s.ok %}badge-ok{% else %}badge-bad{% endif %}">{% if s.ok %}ok{% else %}failed{% endif %}</span> {{ s.detail }}{% else %}{% if let Some(r) = m.manual_reason %}<span class="badge badge-warn">manual</span> {{ r }}{% else %}<span class="badge badge-muted">waiting for the public address…</span>{% endif %}{% endif %}</td></tr>
+    <tr><th scope="row">4. App subscribed to the business account</th>
+      <td>{% if let Some(s) = m.waba %}<span class="badge {% if s.ok %}badge-ok{% else %}badge-bad{% endif %}">{% if s.ok %}ok{% else %}failed{% endif %}</span> {{ s.detail }}{% else %}<span class="badge badge-muted">after step 3</span>{% endif %}</td></tr>
+  </tbody></table>
+  <p class="help small">When all four are green: message the business number from a phone on your Meta app's recipient list (up to 5 phones). The customer must write first — WhatsApp only allows free-text replies within 24 hours of the customer's last message. A temporary Meta token expires after 24 hours (step 1 turns red: generate a new one and update <code>.env</code>).</p>
+  <form method="post" action="/hub/whatsapp/check" class="inline-form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <button class="btn btn-small" type="submit">Check again now</button>
+  </form>
+</section>
+{% endif %}

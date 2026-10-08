@@ -9,7 +9,8 @@ A working, measurable Rust implementation of **M01 — Multi-Tenancy & Tenant Ma
 performance, resource usage and developer experience can be compared with implementations in other
 languages. Scope: all M01 P1 and P2 requirements (27; see `docs/requirements/`) plus the **M10
 omnichannel hub gateway slice** (§20, ADR-0011/0012). Every other module (M02–M40) is represented only
-by ports and labelled reference adapters; WhatsApp and SIP are labelled simulators.
+by ports and labelled reference adapters; WhatsApp uses the real Cloud API (real Meta or the fake-meta
+server, ADR-0013); voice is a labelled simulator.
 
 ## 2. Stack (ADR-0001)
 
@@ -262,7 +263,7 @@ callers (→ M21 and channel modules), `DownstreamProvisioningPort` (→ M23 etc
 Requirements: `docs/requirements/m10-hub-requirements.md`; traceability: `m10-hub-traceability.md`.
 
 ```
-WhatsApp webhook ─┐  (signed, SIMULATED)          ┌─ agent sockets  (/v1/hub/ws/agent)
+WhatsApp webhook ─┐  (signed; Meta or fake-meta)  ┌─ agent sockets  (/v1/hub/ws/agent)
 SBC event feed  ──┼─► ChannelAdapter.ingest ──►   │
 customer socket ──┘   CanonicalMessage            │
                       │ endpoint registry → tenant│
@@ -291,3 +292,11 @@ customer socket ──┘   CanonicalMessage            │
   voice-state blending, typing indicators, embeddable widget, WhatsApp templates/24 h window;
   Regulated tenants' hub data stays in the central cluster; every node runs API + workers + sockets
   (no separate pods).
+
+### 20.1 WhatsApp: real Meta or fake-meta (ADR-0013)
+* `WHATSAPP_PROVIDER=meta|fake` selects the far end of the same `WhatsAppCloudAdapter`.
+* `meta`: `whatsapp_setup.rs` checks the token/number, registers the webhook in Meta and subscribes the
+  app to the business account automatically (public URL from the Compose tunnel or
+  `WHATSAPP_PUBLIC_BASE_URL`); the status box is on `/hub/simulator` and `/hub/admin`.
+* `fake`: `fake_meta` service (Graph API + signed webhooks + bulk generator `/_fake/load`); the
+  simulator console drives it; `hub_load whatsapp` measures hub ack latency and the full round trip.

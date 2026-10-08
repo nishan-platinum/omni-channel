@@ -5,6 +5,7 @@
 pub mod app;
 pub mod bootstrap_auth;
 pub mod demo_seed;
+pub mod fake_meta;
 pub mod modules;
 pub mod platform;
 pub mod web_support;

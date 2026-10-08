@@ -24,7 +24,9 @@ SQLx repositories, Laravel events → typed Rust domain events, Angular → Aska
 * M01 (all P1 and P2 requirements) and the **M10 hub gateway slice** (ADR-0011): channel adapters,
   canonical messages, durable ordered store, skill routing, presence, agent/customer WebSockets,
   multi-node. Do not build the rest of M10 or M02–M40 without an ADR.
-* WhatsApp and SIP are **simulated** adapters (ADR-0012). Label them "simulated" in code, UI and docs.
+* WhatsApp uses the real Cloud API adapter against real Meta or the **fake-meta** server (ADR-0013);
+  label fake-meta "not WhatsApp" everywhere. Voice is a **simulated** SBC feed (ADR-0012). Never log or
+  show WhatsApp tokens/secrets (Meta echoes tokens in errors — redact).
 * Dependencies on other modules are **ports** (`application/ports.rs`) with **reference adapters**
   (`infrastructure/adapters.rs`). Label every reference adapter as such in code, UI and docs.
 * Do not invent business requirements. If something is needed only to make the prototype operable

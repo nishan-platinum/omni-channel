@@ -5,7 +5,12 @@
 //! hub_load idle    [--base URL] [--sessions N] [--hold SECS] [--hosts 127.0.0.1,127.0.0.2]
 //! hub_load latency [--base URL] [--customers N] [--messages M] [--interval-ms MS]
 //! hub_load chaos   [--base URL] [--customers N] [--duration SECS] [--interval-ms MS]
+//! hub_load whatsapp [--base URL] [--fake-meta URL] [--customers N] [--messages M] [--rate R]
 //! ```
+//!
+//! `smoke` and `whatsapp` drive WhatsApp through the **fake-meta** server (FAKE_META_URL,
+//! FAKE_META_ACCESS_TOKEN): fake customers write → signed webhooks → hub → agents (bots here)
+//! reply → the hub's real Cloud API adapter → fake-meta. Needs WHATSAPP_PROVIDER=fake.
 //!
 //! All scenarios use the development demo tenant (`HUB_DEMO_SEED=true`): the Tenant Admin
 //! creates a dedicated agent pool and simulated channels that route to a scenario-specific skill,
@@ -309,19 +314,26 @@ async fn smoke(base: &str) -> R<()> {
     send(&mut agent, json!({ "type": "presence.set", "status": "available" })).await?;
     wait_type(&mut agent, "presence", Duration::from_secs(5)).await?;
 
-    // WhatsApp (simulated, signed) → agent
-    let secret = std::env::var("HUB_SIM_WHATSAPP_APP_SECRET").unwrap_or_else(|_| "dev-sim-whatsapp-app-secret-change-me".into());
+    // WhatsApp: a fake customer writes via fake-meta → signed webhook over HTTP → hub → agent.
+    let fake = FakeMetaCtl::from_env(None)?;
     let from = format!("6019{:07}", now_us() % 10_000_000);
-    let body = json!({"object":"whatsapp_business_account","entry":[{"id":"SMOKE","changes":[{"field":"messages","value":{
-        "messaging_product":"whatsapp","metadata":{"phone_number_id": f.whatsapp},
-        "contacts":[{"profile":{"name":"Smoke Customer"},"wa_id": from}],
-        "messages":[{"from": from, "id": format!("wamid.SMOKE.{}", now_us()), "type":"text","text":{"body":"smoke: hello from WhatsApp"}}]}}]}]})
-    .to_string();
-    let sig = omni_m01::modules::m10_hub::infrastructure::channels::sign(secret.as_bytes(), body.as_bytes());
-    let (st, _) = raw_post(&http, "/v1/hub/channels/whatsapp/webhook", &body, &[("X-Hub-Signature-256", &sig)]).await?;
-    check("signed WhatsApp webhook accepted", st == 200, &mut ok)?;
+    let (st, _) = fake
+        .http
+        .call(
+            "POST",
+            "/_fake/inbound",
+            Some(&fake.token),
+            Some(&json!({ "phone_number_id": f.whatsapp, "from": from, "name": "Smoke Customer", "text": "smoke: hello from WhatsApp" })),
+        )
+        .await
+        .map_err(|e| format!("fake-meta not reachable at {} ({e}); is WHATSAPP_PROVIDER=fake and the fake-meta service up?", fake.url))?;
+    check("fake-meta accepted the customer's WhatsApp message", st == 200, &mut ok)?;
     let a = wait_type(&mut agent, "conversation.assigned", Duration::from_secs(10)).await?;
-    check("WhatsApp conversation routed to the agent", a["messages"][0]["body"] == "smoke: hello from WhatsApp", &mut ok)?;
+    check(
+        "WhatsApp conversation routed to the agent (signed webhook from fake-meta)",
+        a["messages"][0]["body"] == "smoke: hello from WhatsApp",
+        &mut ok,
+    )?;
     let conv = a["conversation"]["id"].as_str().unwrap_or_default().to_string();
     send(
         &mut agent,
@@ -339,7 +351,11 @@ async fn smoke(base: &str) -> R<()> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    check("simulated BSP receipts: queued → sent → delivered → read", read, &mut ok)?;
+    check("Cloud API delivery + receipts from fake-meta: queued → sent → delivered → read", read, &mut ok)?;
+    let (_, outbox) =
+        fake.http.call("GET", &format!("/_fake/outbox?limit=20&phone_number_id={}", f.whatsapp), Some(&fake.token), None).await?;
+    let got = outbox.as_array().into_iter().flatten().any(|m| m["to"] == from.as_str() && m["text"] == "smoke reply");
+    check("the fake customer's phone received the agent reply", got, &mut ok)?;
     send(&mut agent, json!({ "type": "conversation.close", "conversation_id": conv })).await?;
 
     // Web chat customer ↔ agent
@@ -371,27 +387,6 @@ async fn smoke(base: &str) -> R<()> {
     send(&mut agent, json!({ "type": "presence.set", "status": "offline" })).await?;
     println!("hub smoke: {ok} checks passed");
     Ok(())
-}
-
-async fn raw_post(http: &Http, path: &str, body: &str, headers: &[(&str, &str)]) -> R<(u16, String)> {
-    let mut s = TcpStream::connect((http.host.as_str(), http.port)).await.map_err(|e| e.to_string())?;
-    let mut req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
-        http.host,
-        http.port,
-        body.len()
-    );
-    for (k, v) in headers {
-        req.push_str(&format!("{k}: {v}\r\n"));
-    }
-    req.push_str("\r\n");
-    req.push_str(body);
-    s.write_all(req.as_bytes()).await.map_err(|e| e.to_string())?;
-    let mut buf = Vec::new();
-    s.read_to_end(&mut buf).await.map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&buf).to_string();
-    let status = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    Ok((status, text))
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -899,6 +894,152 @@ async fn chaos(a: &Args) -> R<()> {
     Ok(())
 }
 
+// ------------------------------------------------------------------------------------------------
+// fake-meta control (WhatsApp load generation)
+// ------------------------------------------------------------------------------------------------
+
+struct FakeMetaCtl {
+    url: String,
+    http: Http,
+    token: String,
+}
+
+impl FakeMetaCtl {
+    fn from_env(url: Option<String>) -> R<Self> {
+        let url = url.unwrap_or_else(|| std::env::var("FAKE_META_URL").unwrap_or_else(|_| "http://localhost:58090".into()));
+        // Inside Docker the app reaches fake-meta as http://fake-meta:8090; from the host it is
+        // published on localhost:58090.
+        let url = if url.contains("fake-meta:8090") { "http://localhost:58090".to_string() } else { url };
+        let token = std::env::var("FAKE_META_ACCESS_TOKEN").unwrap_or_else(|_| "fake-meta-dev-token".into());
+        Ok(Self { http: Http::new(&url)?, url, token })
+    }
+
+    async fn stats(&self) -> R<Value> {
+        let (st, v) = self.http.call("GET", "/_fake/stats", Some(&self.token), None).await?;
+        if st != 200 {
+            return Err(format!("fake-meta stats: HTTP {st}"));
+        }
+        Ok(v)
+    }
+}
+
+/// Bulk WhatsApp through fake-meta: `customers` × `messages` inbound at `rate`/s; bot agents
+/// reply to each with `rt=<marker>`, so fake-meta measures the full round trip
+/// (customer → webhook → hub → agent socket → reply → Cloud API → fake-meta).
+async fn whatsapp_load(a: &Args) -> R<()> {
+    let base = a.s("base", "http://localhost:3000");
+    let http = Http::new(&base)?;
+    let fake = FakeMetaCtl::from_env(a.opts.get("fake-meta").cloned())?;
+    let customers = a.n("customers", 500);
+    let messages = a.n("messages", 5);
+    let rate = a.n("rate", 200);
+    let per_agent = 50u64;
+    let f = fixture(&http, "waload", customers.div_ceil(per_agent).max(1) as usize, per_agent as i64).await?;
+    let stale = reset_agents(&http, &f.agents).await?;
+    if stale > 0 {
+        println!("closed {stale} conversations left over from earlier runs");
+    }
+    // Bot agents: reply to every load message with its marker.
+    let replied = Arc::new(AtomicU64::new(0));
+    let received = Arc::new(AtomicU64::new(0));
+    for ws in agents_online(&http, &f.agents).await? {
+        let (replied, received) = (replied.clone(), received.clone());
+        tokio::spawn(async move {
+            let mut ws = ws;
+            let mut seen: HashSet<String> = HashSet::new();
+            while let Some(Ok(m)) = ws.next().await {
+                let Message::Text(t) = m else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(t.as_str()) else { continue };
+                let msgs: Vec<Value> = match v["type"].as_str() {
+                    Some("message.new") => vec![v["message"].clone()],
+                    Some("conversation.assigned") | Some("welcome") => v["messages"].as_array().cloned().unwrap_or_default(),
+                    _ => continue,
+                };
+                for msg in msgs {
+                    if msg["direction"] != "inbound" {
+                        continue;
+                    }
+                    let Some(marker) =
+                        msg["body"].as_str().and_then(|b| b.strip_prefix("t=")).and_then(|b| b.split(' ').next()).map(str::to_string)
+                    else {
+                        continue;
+                    };
+                    if !seen.insert(marker.clone()) {
+                        continue;
+                    }
+                    received.fetch_add(1, Ordering::Relaxed);
+                    let frame = json!({ "type": "message.send", "conversation_id": msg["conversation_id"], "client_msg_id": format!("r{}", marker.replace('-', "_")), "body": format!("rt={marker} thanks, we are on it") });
+                    if ws.send(Message::Text(frame.to_string().into())).await.is_err() {
+                        return;
+                    }
+                    replied.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+    }
+    let (st, _) = fake.http.call("POST", "/_fake/reset", Some(&fake.token), None).await?;
+    if st != 204 {
+        return Err(format!("fake-meta reset: HTTP {st} (is it running at {}?)", fake.url));
+    }
+    let total = customers * messages;
+    let (st, run) = fake
+        .http
+        .call(
+            "POST",
+            "/_fake/load",
+            Some(&fake.token),
+            Some(
+                &json!({ "phone_number_id": f.whatsapp, "customers": customers, "messages_per_customer": messages, "rate_per_sec": rate }),
+            ),
+        )
+        .await?;
+    if st != 200 {
+        return Err(format!("fake-meta load: HTTP {st} {run}"));
+    }
+    println!("load run {}: {customers} customers × {messages} messages = {total} at {rate}/s via {}", run["run"], fake.url);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(total / rate.max(1) + 120);
+    let mut last = Instant::now();
+    loop {
+        let s = fake.stats().await?;
+        let rt = s["round_trip"]["count"].as_u64().unwrap_or(0);
+        if last.elapsed() > Duration::from_secs(5) {
+            println!(
+                "  generated={} hub_acked={} agents_received={} replies_accepted={} round_trips={rt} throttled_429={}",
+                s["inbound_generated"],
+                s["webhooks_ok"],
+                received.load(Ordering::Relaxed),
+                s["outbound_accepted"],
+                s["outbound_throttled_429"]
+            );
+            last = Instant::now();
+        }
+        if rt >= total || Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let s = fake.stats().await?;
+    let elapsed = started.elapsed().as_secs_f64();
+    println!(
+        "RESULT whatsapp: messages={total} generated={} hub_acked={} webhook_retries={} given_up={} agents_received={} replies_accepted={} round_trips={} throttled_429={} elapsed_s={elapsed:.1}",
+        s["inbound_generated"], s["webhooks_ok"], s["webhook_retries"], s["webhooks_given_up"], received.load(Ordering::Relaxed), s["outbound_accepted"], s["round_trip"]["count"], s["outbound_throttled_429"]
+    );
+    println!(
+        "  inbound: customer message → hub acknowledged webhook (stored) ms: p50={} p95={} p99={} max={}",
+        s["inbound_ack"]["p50_ms"], s["inbound_ack"]["p95_ms"], s["inbound_ack"]["p99_ms"], s["inbound_ack"]["max_ms"]
+    );
+    println!(
+        "  round trip: customer message → agent reply accepted by the Cloud API ms: p50={} p95={} p99={} max={}",
+        s["round_trip"]["p50_ms"], s["round_trip"]["p95_ms"], s["round_trip"]["p99_ms"], s["round_trip"]["max_ms"]
+    );
+    reset_agents(&http, &f.agents).await?;
+    if s["round_trip"]["count"].as_u64().unwrap_or(0) < total {
+        return Err(format!("only {} of {total} messages completed the round trip before the deadline", s["round_trip"]["count"]));
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
@@ -908,8 +1049,9 @@ async fn main() {
         "idle" => idle(&a).await,
         "latency" => latency(&a).await,
         "chaos" => chaos(&a).await,
+        "whatsapp" => whatsapp_load(&a).await,
         _ => {
-            eprintln!("usage: hub_load smoke|idle|latency|chaos [--base URL] (see source header)");
+            eprintln!("usage: hub_load smoke|idle|latency|chaos|whatsapp [--base URL] (see source header)");
             std::process::exit(2);
         }
     };

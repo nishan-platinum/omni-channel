@@ -208,11 +208,12 @@ impl HubRepository for PgHubRepository {
         address: &str,
         label: &str,
         default_skill: &str,
+        simulated: bool,
     ) -> AppResult<Endpoint> {
         let mut tx = scoped_tx(&self.pool, &AccessScope::Tenant(tenant)).await?;
         let r = sqlx::query(&format!(
             "INSERT INTO hub.channel_endpoints (id, tenant_id, channel, address, label, default_skill, simulated)
-             VALUES ($1, $2, $3, $4, $5, $6, true) RETURNING {ENDPOINT_COLS}"
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {ENDPOINT_COLS}"
         ))
         .bind(Uuid::now_v7())
         .bind(tenant)
@@ -220,6 +221,7 @@ impl HubRepository for PgHubRepository {
         .bind(address)
         .bind(label)
         .bind(default_skill)
+        .bind(simulated)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| match e {
@@ -650,14 +652,14 @@ impl HubRepository for PgHubRepository {
         Ok(rows.iter().map(|r| Ok((r.try_get("tenant_id")?, r.try_get("id")?))).collect::<Result<_, sqlx::Error>>()?)
     }
 
-    async fn claim_outbound(&self, lease_secs: i64, limit: i64) -> AppResult<Vec<OutboundJob>> {
+    async fn claim_outbound(&self, lease_secs: i64, limit: i64, tenant: Option<Uuid>) -> AppResult<Vec<OutboundJob>> {
         let mut tx = scoped_tx(&self.pool, &AccessScope::System).await?;
         // FIFO per conversation: a row is only due when no earlier row of the same conversation
         // is still queued (leased or not), so message n+1 is never sent before message n.
         let rows = sqlx::query(
             "WITH due AS (
                 SELECT q.message_id FROM hub.outbound_queue q
-                 WHERE q.next_attempt_at <= now()
+                 WHERE q.next_attempt_at <= now() AND ($3::uuid IS NULL OR q.tenant_id = $3)
                    AND NOT EXISTS (SELECT 1 FROM hub.outbound_queue e WHERE e.conversation_id = q.conversation_id AND e.seq < q.seq)
                  ORDER BY q.created_at LIMIT $2 FOR UPDATE SKIP LOCKED)
              UPDATE hub.outbound_queue q SET next_attempt_at = now() + make_interval(secs => $1)
@@ -666,6 +668,7 @@ impl HubRepository for PgHubRepository {
         )
         .bind(lease_secs as f64)
         .bind(limit)
+        .bind(tenant)
         .fetch_all(&mut *tx)
         .await?;
         let ids: Vec<Uuid> = rows.iter().map(|r| r.try_get("message_id")).collect::<Result<_, _>>()?;
@@ -732,11 +735,23 @@ impl HubRepository for PgHubRepository {
         Ok(change)
     }
 
-    async fn outbound_failed(&self, job: &OutboundJob, error: &str) -> AppResult<Option<StatusChange>> {
+    async fn outbound_failed(&self, job: &OutboundJob, error: &str, kind: FailureKind) -> AppResult<Option<StatusChange>> {
         let mut tx = scoped_tx(&self.pool, &AccessScope::Tenant(job.tenant_id)).await?;
-        let attempts = job.attempts + 1;
         let err: String = error.chars().take(500).collect();
-        let change = match retry_delay_secs(attempts) {
+        if kind == FailureKind::Throttled {
+            sqlx::query(
+                "UPDATE hub.outbound_queue SET last_error = $2, next_attempt_at = now() + interval '1 second' WHERE message_id = $1",
+            )
+            .bind(job.message_id)
+            .bind(&err)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let attempts = job.attempts + 1;
+        let delay = if kind == FailureKind::Permanent { None } else { retry_delay_secs(attempts) };
+        let change = match delay {
             Some(delay) => {
                 sqlx::query(
                     "UPDATE hub.outbound_queue SET attempts = $2, last_error = $3, next_attempt_at = now() + make_interval(secs => $4)
@@ -896,29 +911,6 @@ impl HubRepository for PgHubRepository {
         .transpose()?)
     }
 
-    async fn claim_due_callbacks(&self, limit: i64) -> AppResult<Vec<ProviderCallback>> {
-        let mut tx = scoped_tx(&self.pool, &AccessScope::System).await?;
-        let rows = sqlx::query(
-            "DELETE FROM hub.sim_callbacks WHERE id IN (
-                 SELECT id FROM hub.sim_callbacks WHERE due_at <= now() ORDER BY due_at LIMIT $1 FOR UPDATE SKIP LOCKED)
-             RETURNING channel, signature, body",
-        )
-        .bind(limit)
-        .fetch_all(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(rows
-            .iter()
-            .map(|r| {
-                Ok(ProviderCallback {
-                    channel: parse(r.try_get("channel")?)?,
-                    signature: r.try_get("signature")?,
-                    body: r.try_get("body")?,
-                })
-            })
-            .collect::<Result<_, sqlx::Error>>()?)
-    }
-
     async fn sim_log(&self, tenant: Uuid, channel: Channel, direction: &str, summary: &str, payload: &Value) -> AppResult<()> {
         let mut tx = scoped_tx(&self.pool, &AccessScope::Tenant(tenant)).await?;
         sqlx::query(
@@ -979,26 +971,4 @@ fn agent_view(r: &PgRow) -> Result<AgentView, sqlx::Error> {
         heartbeat_at: r.try_get("heartbeat_at")?,
         node_id: r.try_get("node_id")?,
     })
-}
-
-/// Database-backed schedule for the SIMULATED BSP's receipts (any node processes them when due).
-#[async_trait]
-impl super::channels::whatsapp_sim::SimCallbackSink for PgHubRepository {
-    async fn schedule(&self, tenant: Uuid, cb: ProviderCallback, after: std::time::Duration) -> AppResult<()> {
-        let mut tx = scoped_tx(&self.pool, &AccessScope::Tenant(tenant)).await?;
-        sqlx::query(
-            "INSERT INTO hub.sim_callbacks (id, tenant_id, channel, signature, body, due_at)
-             VALUES ($1, $2, $3, $4, $5, now() + make_interval(secs => $6))",
-        )
-        .bind(Uuid::now_v7())
-        .bind(tenant)
-        .bind(cb.channel.as_str())
-        .bind(&cb.signature)
-        .bind(&cb.body)
-        .bind(after.as_secs_f64())
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(())
-    }
 }

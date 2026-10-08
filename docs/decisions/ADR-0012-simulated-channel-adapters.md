@@ -1,6 +1,7 @@
 # ADR-0012 — Simulated channel adapters (no real WhatsApp / telco credentials)
 
-* Status: Accepted · Date: 2026-10-07
+* Status: Accepted · Date: 2026-10-07 · **WhatsApp part superseded by ADR-0013** (real Cloud API adapter +
+  fake-meta server); the simulated SBC voice feed below still applies.
 
 ## Context
 The gateway must ingest WhatsApp messages (OCC-M05-R001) and SIP call events (OCC-M03-R001/R012) and
