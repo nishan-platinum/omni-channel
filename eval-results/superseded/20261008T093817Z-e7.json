@@ -1,0 +1,4 @@
+{"scenario": "e7", "stamp": "20261008T093817Z", "results": [
+{"connected":10000,"dropped":16286,"failed":0,"mode":"ramp","pong_ms":{"max":1606.784515,"p50":0.412703,"p99":354.45716799999997,"samples":41077},"ramp_secs":10.202144684,"resumed":16286,"sessions":10000},{"connected":10000,"dropped":13711,"failed":0,"mode":"ramp","pong_ms":{"max":1575.6608079999999,"p50":0.417101,"p99":398.23366599999997,"samples":41162},"ramp_secs":10.201855863,"resumed":13711,"sessions":10000}
+], "extra": {},
+"images": [{"service":"gw1","image":"sha256:320c920a7d46c15288fb9235f820a9906c5c7ea30855927cdbe2d76f2ca19ddf"},{"service":"gw2","image":"sha256:320c920a7d46c15288fb9235f820a9906c5c7ea30855927cdbe2d76f2ca19ddf"}]}

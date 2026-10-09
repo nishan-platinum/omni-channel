@@ -21,7 +21,7 @@ default = []
 
 [dependencies]
 # web
-axum = { version = "0.8", features = ["macros", "multipart"] }
+axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util", "timeout", "limit"] }
 tower-http = { version = "0.6", features = ["trace", "fs", "set-header", "limit", "catch-panic"] }
@@ -35,6 +35,12 @@ serde_json = "1"
 uuid = { version = "1", features = ["v7", "v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 toml = "0.8"
+
+# real-time (M10 hub: cross-node fan-out, ADR-0011) + WebSocket client for the load tool
+redis = { version = "1", default-features = false, features = ["tokio-comp", "aio"] }
+tokio-tungstenite = "0.30"
+# outbound HTTP to the WhatsApp Cloud API (real Meta or the fake-meta server), ADR-0013
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "http2"] }
 
 # observability
 tracing = "0.1"

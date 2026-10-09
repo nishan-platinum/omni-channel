@@ -1,0 +1,4 @@
+{"scenario": "e7", "stamp": "20261008T113936Z", "results": [
+{"connected":10000,"dropped":18010,"failed":0,"mode":"ramp","pong_ms":{"max":832.423581,"p50":0.213447,"p99":44.310918,"samples":41257},"ramp_secs":10.202738502,"resumed":18010,"sessions":10000,"sessions_never_dropped":0},{"connected":10000,"dropped":11990,"failed":0,"mode":"ramp","pong_ms":{"max":827.0043959999999,"p50":0.213207,"p99":39.546719,"samples":41376},"ramp_secs":10.202343507,"resumed":11990,"sessions":10000,"sessions_never_dropped":0}
+], "extra": {},
+"images": [{"service":"gw1","image":"sha256:3a965550631c518eddf40714fb4019e77890ac28a511a70ff4ef1ed41bc7317a"},{"service":"gw2","image":"sha256:3a965550631c518eddf40714fb4019e77890ac28a511a70ff4ef1ed41bc7317a"}]}

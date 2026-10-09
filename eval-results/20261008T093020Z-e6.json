@@ -1,0 +1,4 @@
+{"scenario": "e6", "stamp": "20261008T093020Z", "results": [
+{"acked_messages":131995,"agent_reconnect_ms":{"max":3509.297067,"p50":440.284943,"samples":100,"within_30s":100},"agent_reconnects":100,"agent_replies":12000,"agents":200,"close_errors":{},"conversations":2000,"conversations_closed_at_end":2000,"conversations_with_seq_gaps":0,"customers":2000,"duplicates_delivered":0,"duration_s":240.001410047,"error_rate_pct":0.0,"latency_ms":{"max":6664.915225,"p50":11.757866,"p95":118.67752800000001,"p99":3011.683306,"samples":120000},"lost_acked":0,"mode":"load","post_attempt_errors":1770,"post_failed":0,"posts":120000,"rate_achieved":499.99706241934217,"rate_target":500,"run":"98f458","stored_but_unacked":5,"undelivered_to_agent":0}
+], "extra": {},
+"images": [{"service":"gw1","image":"sha256:320c920a7d46c15288fb9235f820a9906c5c7ea30855927cdbe2d76f2ca19ddf"},{"service":"gw2","image":"sha256:320c920a7d46c15288fb9235f820a9906c5c7ea30855927cdbe2d76f2ca19ddf"}]}

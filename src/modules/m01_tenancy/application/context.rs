@@ -41,6 +41,8 @@ impl From<DomainError> for AppError {
 pub enum ActorRole {
     SuperAdmin,
     TenantAdmin,
+    /// M10 agent: no M01 administration rights at all (denied below).
+    Agent,
     /// Internal jobs (scheduler, billing-driven transitions via service scope).
     System,
 }
@@ -50,6 +52,7 @@ impl ActorRole {
         match self {
             Self::SuperAdmin => "super_admin",
             Self::TenantAdmin => "tenant_admin",
+            Self::Agent => "agent",
             Self::System => "system",
         }
     }
@@ -108,7 +111,7 @@ impl Actor {
         match self.role {
             ActorRole::SuperAdmin => Ok(AccessScope::Platform),
             ActorRole::System => Ok(AccessScope::System),
-            ActorRole::TenantAdmin => Err(AppError::forbidden("Platform Super Admin role required")),
+            ActorRole::TenantAdmin | ActorRole::Agent => Err(AppError::forbidden("Platform Super Admin role required")),
         }
     }
 
@@ -237,6 +240,7 @@ impl M01Deps {
                 }
                 None => Err(AppError::forbidden("No tenant context")),
             },
+            ActorRole::Agent => Err(AppError::forbidden("Tenant Admin role required")),
         }
     }
 

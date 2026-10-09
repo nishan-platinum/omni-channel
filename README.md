@@ -1,4 +1,4 @@
-# TM CPaaS Omni Channel CRM — M01 Multi-Tenancy & Tenant Management (Rust)
+# TM CPaaS Omni Channel CRM — M01 Multi-Tenancy + M10 Omnichannel Hub gateway (Rust)
 
 A runnable Rust implementation of **M01 — Multi-Tenancy & Tenant Management** from the *TM CPaaS Omni
 Channel CRM Unified Functional & Design Specification v2.0*, built so its correctness, performance and
@@ -7,6 +7,11 @@ resource usage can be compared with implementations in other languages.
 * **Scope:** M01 only — all 27 unified requirements (P1 and P2), business rules BR-M01-001…005, field
   dependencies FD-008…011, notifications NT-001…003, the tenant state machine and the M01 `/v1` API.
   Other modules (M02–M40) appear only as ports with clearly-labelled **reference adapters**.
+* **Plus the M10 omnichannel hub gateway slice:** WhatsApp (real Cloud API — real Meta or the fake-meta
+  load-test server) and a simulated SIP feed → one canonical
+  message → durable, ordered store → skill-based routing with queues → live agent and customer
+  WebSocket sessions (heartbeat, resume), across two nodes behind a load balancer. **No real WhatsApp
+  or telco credentials are needed** — the channels are labelled simulators (ADR-0011, ADR-0012).
 * **Stack:** Rust · Axum · Tokio · Askama (server-rendered HTML) · HTMX · SQLx · Serde · Tower ·
   tracing · PostgreSQL (control plane + shared/schema tenant data) · PostgreSQL & MySQL (dedicated tenant
   databases). No PHP/Laravel/Angular/Node.
@@ -38,7 +43,8 @@ The Super Admin is created at first start if it does not exist. Passwords live o
 (development placeholders — change them for any shared environment); nothing is hard-coded in Rust.
 
 Services: `app` (:3000), `central-db` PostgreSQL 16 (control plane, :55432), `tenant-pg` PostgreSQL 16
-(dedicated tenant databases, :55433), `tenant-mysql` MySQL 8.4 (dedicated tenant databases, :53306).
+(dedicated tenant databases, :55433), `tenant-mysql` MySQL 8.4 (dedicated tenant databases, :53306),
+`redis` Redis 7 (hub real-time bus, :56379).
 All have health checks and named volumes. The app applies the control-plane migrations itself at startup
 (idempotent) using the owner role, then serves with the restricted runtime role `crm_app`
 (NOBYPASSRLS, not table owner). `GET /health` (liveness) and `GET /ready` (central DB reachable).
@@ -49,12 +55,96 @@ Reset everything: `docker compose down -v`.
 
 ```bash
 cp .env.example .env                                   # once
-docker compose up -d central-db tenant-pg tenant-mysql # databases only
+docker compose up -d central-db tenant-pg tenant-mysql redis # databases + Redis only
 cargo run                                              # http://localhost:3000
 ```
 
 `.env` already points at the Docker-published ports (`localhost:55432/55433/53306`) and at
 `config/tenant-db-targets.local.toml`. For release-mode measurements use `cargo run --release`.
+
+## Try the omnichannel gateway (no credentials needed)
+
+With `HUB_DEMO_SEED=true` (the default in `.env.example`, development only) the app creates tenant
+**demo** with simulated channels and three agents. Every password is `HUB_DEMO_PASSWORD`
+(default `Demo-Hub-Passw0rd!`); the organisation code is `demo`.
+
+| Who | Email | Skills |
+|---|---|---|
+| Tenant Admin | `admin@demo.omni.local` | — |
+| Agent | `agent.sales@demo.omni.local` | sales |
+| Agent | `agent.support@demo.omni.local` | support |
+| Agent | `agent.lead@demo.omni.local` | sales, support |
+
+1. **Agent:** in one browser, sign in as `agent.support@…` → you land on the **Agent desktop**. Set your
+   status to **Available**.
+2. **Customer on WhatsApp (fake-meta):** in a *private* window, sign in as `admin@demo.omni.local` →
+   **Simulator** → *WhatsApp: customer sends a message*. The fake-meta server delivers it to the hub as a
+   signed webhook; it appears on the agent desktop within a second (skill `support`). The agent's reply
+   goes out through the real Cloud API adapter to fake-meta, and its status moves **queued → sent →
+   delivered → read**. `[fail]` in a reply = permanent error, `[retry]` = retry ladder.
+3. **Phone call (simulated SBC):** Simulator → *Voice*: send `ringing`, `answered`, `ended` with the same
+   call id → one ordered voice conversation on the desktop.
+4. **Web chat:** Simulator (or *Contact centre*) → **Open customer chat**. Sign in as `agent.sales@…` /
+   `agent.lead@…` and go Available; chat live in both directions; the agent sees **read** when the
+   customer has seen the reply. Reload either page: history and conversation resume.
+5. **Contact centre** (Tenant Admin) shows queues per skill, agents with live status/load, channels and
+   recent conversations, and lets you add agents and simulated channels.
+
+### Real WhatsApp (real phones) — only `.env` changes
+
+Needs a Meta app with WhatsApp (developers.facebook.com → your app → WhatsApp → API Setup). In `.env`:
+
+```env
+WHATSAPP_PROVIDER=meta
+WHATSAPP_ACCESS_TOKEN=EAA...            # API Setup → Generate access token (temporary ones last 24 h)
+WHATSAPP_APP_SECRET=...                 # App settings → Basic → App secret
+WHATSAPP_PHONE_NUMBER_ID=...            # API Setup, under the test number
+WHATSAPP_APP_ID=...                     # app dashboard / App settings → Basic
+WHATSAPP_BUSINESS_ACCOUNT_ID=...        # API Setup, next to the Phone number ID
+WHATSAPP_DISPLAY_NUMBER=+1 555 ...      # label only
+WHATSAPP_VERIFY_TOKEN=any-word-you-like
+COMPOSE_PROFILES=tunnel                 # public HTTPS address via cloudflared (no account)
+```
+
+Then `docker compose up -d`. The hub checks the token, opens the tunnel, **registers its webhook in Meta
+by itself** and connects the number to tenant `demo` (skill `support`). The **Real WhatsApp (Meta)
+connection** box on the Simulator / Contact centre page turns green when ready. From a phone on the
+app's recipient list (max. 5), send a WhatsApp message to the test number → it appears on the agent
+desktop → the agent's reply arrives on the phone. Limits of Meta test numbers: the customer must write
+first (24-hour window), only verified recipients, no bulk. For a fixed tunnel address use
+`COMPOSE_PROFILES=tunnel-ngrok` with `NGROK_AUTHTOKEN` and `NGROK_DOMAIN`. Switch back to
+`WHATSAPP_PROVIDER=fake` for bulk tests.
+
+### WhatsApp bulk load (fake-meta)
+
+`./target/release/hub_load whatsapp --customers 500 --messages 5 --rate 200` (or the *WhatsApp bulk
+load* form on the Simulator page): fake customers write through signed webhooks, bot agents reply, and
+fake-meta reports the hub's ack latency and the full round trip. Tunables: `FAKE_META_RATE_PER_SEC`
+(per-number send limit, default 80 like Meta), `FAKE_META_LATENCY_*`, `FAKE_META_ERROR_RATE`,
+`FAKE_META_DUPLICATE_RATE`.
+
+Two nodes behind a load balancer: `docker compose --profile cluster up -d` → http://localhost:8080
+(nodes `app1` + `app2`, nginx round robin, not sticky). `./scripts/hub_cluster_test.sh` kills a node and
+restarts the other while customers and agents chat, then verifies **zero acknowledged messages lost**.
+
+## ScicomCX bake-off gateway (reference build)
+
+A separate, single-tenant gateway that implements the ScicomCX bake-off contract exactly
+(ADR-0014, `docs/architecture/gateway-protocol.md`): `/ingress/whatsapp`, `/ingress/sip`,
+`/conversations`, `/presence`, `/config/reload`, `/healthz`, `/metrics`, `/ws/customer`, `/ws/agent`.
+It has its own binary (`gateway`), database and Compose profile and does not touch the CRM.
+It is a reference build of the contract, the conformance suite and the harness — **not** an
+official bake-off candidate (it was not built from the fresh scaffold under the build protocol).
+
+```bash
+docker compose --profile gateway up -d          # gw1 (:4001), gw2 (:4002), HAProxy (:8088), gateway-db
+RUNS=3 ./conformance/run.sh                     # black-box suite C01–C51, 3 runs in a row
+./scripts/gateway_eval.sh reset                 # empty queues before a measurement
+./scripts/gateway_eval.sh e1|e2|e3|e5|e6|e7|e9  # eval scenarios (scaled to this machine)
+```
+Token: `GATEWAY_TOKEN` (default `dev-gateway-token-change-me`). Results and caveats:
+`docs/architecture/gateway-measurements-2026-10-08.md`; traceability:
+`docs/requirements/gateway-bakeoff-traceability.md`.
 
 ## Walk-through
 
@@ -112,8 +202,8 @@ Reference plan ids: Standard `…0001`, Premium `…0002`, Regulated `…0003` (
 
 ## Tests and quality gates
 
-The integration tests need the Docker databases (`docker compose up -d central-db tenant-pg tenant-mysql`)
-and `.env` (copied from `.env.example`).
+The integration tests need the Docker databases and Redis
+(`docker compose up -d central-db tenant-pg tenant-mysql redis`) and `.env` (copied from `.env.example`).
 
 ```bash
 cargo fmt --check
@@ -122,17 +212,21 @@ cargo test --all-features            # everything (unit + integration)
 cargo test --lib                     # unit tests only (no database needed)
 cargo test --test isolation          # tenant-isolation suite — release blocker
 cargo test --test postgres --test mysql --test m01
-./scripts/smoke_test.sh              # end-to-end HTTP smoke test against a running stack
+cargo test --test hub                # M10 gateway: WebSockets, routing, simulated channels
+./scripts/smoke_test.sh              # end-to-end HTTP smoke test against a running stack (incl. hub)
+./scripts/hub_cluster_test.sh        # 2 hub nodes + nginx: node kill + rolling restart, zero acked loss
 ```
 
 | Suite | Count | Covers |
 |---|---|---|
-| unit (`src/**`) | 86 | domain rules, platform primitives |
+| unit (`src/**`) | 104 | domain rules (M01 + hub routing/statuses), platform primitives, session registry, simulated channels |
 | `tests/m01` | 44 | provisioning, lifecycle, config/flags, quotas, branding, support access, P2, UI forms |
-| `tests/isolation` | 11 | cross-tenant read/update/delete, id tampering, body/query tenant_id, missing context, suspended/terminated, SA elevation + audit, RLS with the non-bypass role |
+| `tests/isolation` | 17 | cross-tenant read/update/delete, id tampering, body/query tenant_id, missing context, suspended/terminated, SA elevation + audit, RLS with the non-bypass role; hub: cross-tenant conversations, RLS on `hub.*`, endpoint-only tenant resolution, role separation, suspension |
+| `tests/hub` | 12 | routing/queueing/capacity, receipts, retry ladder, ordering + idempotency, resume, web chat, voice events, webhook auth, presence reaper, user quota |
 | `tests/postgres` | 6 | forced RLS, optimistic locking, constraints, append-only audit, schema/dedicated stores |
 | `tests/mysql` | 2 | dedicated MySQL provisioning, routing, login boundary, decommission, outage isolation |
-| `scripts/smoke_test.sh` | 47 checks | browser forms + CSRF, invitation flow, TA isolation, API, PG/MySQL tenants |
+| `scripts/smoke_test.sh` | 51 checks | browser forms + CSRF, invitation flow, TA isolation, API, PG/MySQL tenants, hub end to end |
+| `scripts/hub_cluster_test.sh` | chaos run | two nodes, SIGKILL + rolling restart, zero acknowledged messages lost |
 
 CI (`.github/workflows/ci.yml`) runs fmt, clippy, unit tests, the isolation suite (separate blocking step),
 the database tests on service containers, and the Docker build.
@@ -151,17 +245,35 @@ validation, tenant list/fetch/creation, config read/update, quota check, lifecyc
 rejection. Results go to `bench-results/<timestamp>/`. See the
 [procedure](docs/architecture/performance-testing.md); no security control is disabled for benchmarks.
 
+Gateway (M10 hub) measurements use the bundled driver (needs `HUB_DEMO_SEED=true`):
+
+```bash
+cargo build --release --bin hub_load
+./target/release/hub_load latency --base http://localhost:3000 --customers 500 --messages 20
+./target/release/hub_load idle --base http://localhost:3000 --sessions 100000 --hold 45 \
+    --hosts 127.0.0.1,127.0.0.2,127.0.0.3,127.0.0.4,127.0.0.5,127.0.0.6,127.0.0.7,127.0.0.8
+./scripts/hub_cluster_test.sh                       # node kill + rolling restart, zero acked loss
+```
+
+First results (one laptop, client and server on the same machine): 100 000 idle sessions on one node
+with 0 failures; delivery p50 ≈ 5 ms / p99 ≈ 60–115 ms at ≈ 720 msg/s; 4 561 messages through a node
+kill and a rolling restart with 0 lost — see [`docs/architecture/hub-measurements-2026-10-07.md`](docs/architecture/hub-measurements-2026-10-07.md).
+
 ## Repository layout
 
 ```
 src/platform/           config, db (scoped tenant transactions), errors, events (outbox), audit, middleware, …
 src/bootstrap_auth/     minimal login/sessions/invitations/CSRF — replaceable by M02
 src/modules/m01_tenancy/{domain,application,infrastructure,web}
-templates/ static/      Askama templates, CSS, vendored HTMX
+src/modules/m10_hub/{domain,application,infrastructure,web}   omnichannel hub gateway slice
+src/bin/hub_load.rs     gateway driver: smoke / idle / latency / chaos
+src/demo_seed.rs        development-only demo tenant, agents, simulated channels
+templates/ static/      Askama templates, CSS, vendored HTMX, hub-agent.js / hub-chat.js
 migrations/control      central PostgreSQL;   migrations/tenant/{postgres,mysql}  tenant data plane
 config/                 dedicated tenant DB target catalogues (Docker / local)
-tests/                  m01, isolation, postgres, mysql (+ shared harness)
-scripts/                smoke_test.sh, benchmark.sh
+docker/lb               nginx config for the two-node cluster profile
+tests/                  m01, hub, isolation, postgres, mysql (+ shared harness)
+scripts/                smoke_test.sh, benchmark.sh, hub_cluster_test.sh
 ```
 
 ## Reference adapters (not production integrations)
@@ -180,9 +292,13 @@ scripts/                smoke_test.sh, benchmark.sh
 | AnonymisedDataCopyPort | M29/M38 | copies nothing (no M01 business data) |
 | Metering endpoint | M21 | `POST /v1/reference/metering/{id}` (Super Admin) + automatic API-call metering |
 | Secret resolver | vault | `env:TENANT_DB_*` variables only; HMAC-derived per-tenant DB logins |
+| ChannelAdapter `whatsapp` | Meta WhatsApp Cloud API (M05) | **real adapter**; with `WHATSAPP_PROVIDER=fake` it talks to **fake-meta** (not WhatsApp): same API, signed webhooks, receipts, limits, `[fail]`/`[retry]` markers, bulk generator |
+| ChannelAdapter `voice` | TM SBC / voice connector (M03) | **simulated**: signed JSON call-event feed, no SIP/media |
 
 ## Known prototype limitations
 
 See DESIGN.md §18: reference adapters above; per-instance rate limiter; audit hash chain serialises audited
-writes; Super Admin and Tenant Admin roles only; tenant data plane holds only the M01 isolation canary;
-no real DNS/TLS/email/PDF. The confidential specification PDF is git-ignored and must never be committed.
+writes; Super Admin, Tenant Admin and Agent roles only; tenant data plane holds only the M01 isolation
+canary; no real DNS/TLS/email/PDF. Hub: see DESIGN.md §20 and `docs/requirements/m10-hub-traceability.md`
+(no contact/case linking, no priority/business-hours/SLA routing, no WhatsApp templates for
+business-initiated messages; voice is simulated). The confidential specification PDF is git-ignored and must never be committed.

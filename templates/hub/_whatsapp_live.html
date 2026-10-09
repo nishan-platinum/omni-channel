@@ -1,0 +1,19 @@
+{% if let Some(e) = error %}<p class="field-error">{{ e }}</p>{% endif %}
+{% if let Some(s) = stats %}
+<table class="compact">
+  <tbody>
+    <tr><th scope="row">Customer messages generated</th><td>{{ s["inbound_generated"] }}</td>
+        <th scope="row">Webhooks the hub acknowledged</th><td>{{ s["webhooks_ok"] }} <span class="small">(retries {{ s["webhook_retries"] }}, given up {{ s["webhooks_given_up"] }}, queued {{ s["webhook_queue"] }})</span></td></tr>
+    <tr><th scope="row">Hub ack latency (message → 2xx)</th><td colspan="3">p50 {{ s["inbound_ack"]["p50_ms"] }} ms · p95 {{ s["inbound_ack"]["p95_ms"] }} ms · p99 {{ s["inbound_ack"]["p99_ms"] }} ms · max {{ s["inbound_ack"]["max_ms"] }} ms ({{ s["inbound_ack"]["count"] }} samples)</td></tr>
+    <tr><th scope="row">Agent replies accepted</th><td>{{ s["outbound_accepted"] }}</td>
+        <th scope="row">Rejected</th><td>429 throttled {{ s["outbound_throttled_429"] }} · injected errors {{ s["outbound_injected_errors"] }} · 24 h window {{ s["outbound_window_closed"] }} · undeliverable {{ s["outbound_undeliverable"] }} · bad token {{ s["outbound_unauthorized"] }}</td></tr>
+    <tr><th scope="row">Round trip (customer → agent reply)</th><td colspan="3">p50 {{ s["round_trip"]["p50_ms"] }} ms · p95 {{ s["round_trip"]["p95_ms"] }} ms · p99 {{ s["round_trip"]["p99_ms"] }} ms ({{ s["round_trip"]["count"] }} samples; only replies quoting <code>rt=…</code>, e.g. from <code>hub_load whatsapp</code>)</td></tr>
+    <tr><th scope="row">Status webhooks queued</th><td colspan="3">{{ s["statuses_queued"] }} (sent / delivered / read)</td></tr>
+  </tbody>
+</table>
+{% endif %}
+<h3>What the fake customers' phones received</h3>
+{% if outbox.is_empty() %}<p class="empty">No replies yet.</p>{% else %}
+<table class="compact"><thead><tr><th>Time (UTC)</th><th>To</th><th>Text</th></tr></thead><tbody>
+{% for m in outbox %}<tr><td class="small">{{ m["at"].as_str().unwrap_or("").get(11..19).unwrap_or("") }}</td><td>+{{ m["to"].as_str().unwrap_or("") }}</td><td>{{ m["text"].as_str().unwrap_or("") }}</td></tr>{% endfor %}
+</tbody></table>{% endif %}

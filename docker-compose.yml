@@ -1,5 +1,7 @@
-# Local runtime for the M01 Rust prototype:
+# Local runtime for the M01 + M10 hub Rust prototype:
 #   cp .env.example .env && docker compose up --build   →  http://localhost:3000
+# Two hub nodes behind one load balancer (gateway multi-node tests):
+#   docker compose --profile cluster up --build -d       →  http://localhost:8080
 name: omni-m01
 
 services:
@@ -54,15 +56,69 @@ services:
       timeout: 5s
       retries: 40
 
-  app:
-    build: .
-    env_file: .env
+  # Real-time bus of the M10 hub (cross-node fan-out, FR-ARC-003). Holds no durable data.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # Imitation of Meta's WhatsApp Cloud API (NOT WhatsApp) — used when WHATSAPP_PROVIDER=fake.
+  # Receives the hub's Graph API calls and posts signed webhooks back; generates bulk traffic.
+  fake-meta:
+    image: omni-m01-app:local
+    command: ["fake_meta"]
     environment:
+      FAKE_META_BIND: 0.0.0.0:8090
+      FAKE_META_WEBHOOK_URL: ${FAKE_META_WEBHOOK_URL:-http://app:3000/v1/hub/channels/whatsapp/webhook}
+      FAKE_META_ACCESS_TOKEN: ${FAKE_META_ACCESS_TOKEN:-fake-meta-dev-token}
+      FAKE_META_APP_SECRET: ${FAKE_META_APP_SECRET:-fake-meta-dev-app-secret}
+      FAKE_META_RATE_PER_SEC: ${FAKE_META_RATE_PER_SEC:-80}
+      FAKE_META_LATENCY_MIN_MS: ${FAKE_META_LATENCY_MIN_MS:-20}
+      FAKE_META_LATENCY_MAX_MS: ${FAKE_META_LATENCY_MAX_MS:-80}
+      FAKE_META_ERROR_RATE: ${FAKE_META_ERROR_RATE:-0}
+      FAKE_META_DUPLICATE_RATE: ${FAKE_META_DUPLICATE_RATE:-0}
+      RUST_LOG: ${GATEWAY_RUST_LOG:-info}
+    ports:
+      - "58090:8090"
+    restart: unless-stopped
+
+  # Public HTTPS address for real WhatsApp (Meta must reach the webhook). Enable ONE of them with
+  # COMPOSE_PROFILES in .env:  tunnel = cloudflared quick tunnel (no account; new address on every
+  # restart — the hub re-registers it in Meta automatically);  tunnel-ngrok = ngrok fixed domain
+  # (free account; NGROK_AUTHTOKEN + NGROK_DOMAIN).
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    command: ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "--url", "http://app:3000"]
+    restart: unless-stopped
+  tunnel-ngrok:
+    image: ngrok/ngrok:latest
+    profiles: ["tunnel-ngrok"]
+    command: ["http", "--url=${NGROK_DOMAIN:-missing-NGROK_DOMAIN}", "app:3000"]
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    restart: unless-stopped
+
+  app: &app
+    build: .
+    image: omni-m01-app:local
+    env_file: .env
+    environment: &app-env
       # Container-internal addresses override the localhost values used by `cargo run`.
       APP_BIND_ADDR: 0.0.0.0:3000
       DATABASE_URL: postgres://crm_app:${CRM_APP_PASSWORD}@central-db:5432/omni_control
       MIGRATION_DATABASE_URL: postgres://crm_owner:${POSTGRES_OWNER_PASSWORD}@central-db:5432/omni_control
       TENANT_DB_TARGETS_FILE: /app/config/tenant-db-targets.toml
+      REDIS_URL: redis://redis:6379
+      FAKE_META_URL: http://fake-meta:8090
+      TUNNEL_METRICS_URL: http://tunnel:2000
+      NODE_ID: app
       DATA_DIR: /app/data
       LOG_FORMAT: json
     volumes:
@@ -76,6 +132,108 @@ services:
         condition: service_healthy
       tenant-mysql:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      fake-meta:
+        condition: service_started
+    restart: unless-stopped
+
+  # ---- profile "cluster": two hub nodes + nginx load balancer (WebSocket upgrade) on :8080 ----
+  app1:
+    <<: *app
+    profiles: ["cluster"]
+    environment:
+      <<: *app-env
+      NODE_ID: app1
+      PUBLIC_BASE_URL: http://localhost:8080
+    ports: []
+  app2:
+    <<: *app
+    profiles: ["cluster"]
+    environment:
+      <<: *app-env
+      NODE_ID: app2
+      PUBLIC_BASE_URL: http://localhost:8080
+      HUB_DEMO_SEED: "false"
+    ports: []
+  lb:
+    image: nginx:1.27-alpine
+    profiles: ["cluster"]
+    volumes:
+      - ./docker/lb/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      - app1
+      - app2
+
+
+  # ---- profile "gateway": ScicomCX bake-off gateway slice (ADR-0014) --------------------------
+  # Two gateway nodes + HAProxy (:8088, round-robin, no stickiness) + its own PostgreSQL. Nodes are
+  # also reachable directly (gw1 :4001, gw2 :4002) for cross-node conformance tests.
+  gateway-db:
+    image: postgres:16-alpine
+    profiles: ["gateway"]
+    command: ["postgres", "-c", "max_connections=200", "-c", "shared_buffers=256MB"]
+    environment:
+      POSTGRES_DB: gateway
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${GATEWAY_DB_PASSWORD:-dev-gateway-db-password-change-me}
+    ports:
+      - "55434:5432"
+    volumes:
+      - gateway-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  gw1: &gw
+    image: omni-m01-app:local
+    profiles: ["gateway"]
+    command: ["gateway"]
+    environment: &gw-env
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:-dev-gateway-token-change-me}
+      GATEWAY_DATABASE_URL: postgres://gateway:${GATEWAY_DB_PASSWORD:-dev-gateway-db-password-change-me}@gateway-db:5432/gateway
+      GATEWAY_REDIS_URL: redis://redis:6379
+      GATEWAY_FIXTURE: /app/config/gateway-fixture.json
+      GATEWAY_NODE_ID: gw1
+      LOG_FORMAT: json
+      RUST_LOG: ${GATEWAY_RUST_LOG:-info}
+    ports:
+      - "4001:4000"
+    # Bake-off test box: 4 vCPU per gateway node (memory is bounded by this machine instead).
+    cpus: 4
+    ulimits:
+      nofile: { soft: 1048576, hard: 1048576 }
+    depends_on:
+      gateway-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+  gw2:
+    <<: *gw
+    environment:
+      <<: *gw-env
+      GATEWAY_NODE_ID: gw2
+    ports:
+      - "4002:4000"
+  gw-lb:
+    image: haproxy:3.0-alpine
+    profiles: ["gateway"]
+    environment:
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:-dev-gateway-token-change-me}
+    volumes:
+      - ./docker/gateway/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "8088:8088"
+    ulimits:
+      nofile: { soft: 1048576, hard: 1048576 }
+    depends_on:
+      - gw1
+      - gw2
     restart: unless-stopped
 
 volumes:
@@ -83,3 +241,4 @@ volumes:
   tenant-pg-data:
   tenant-mysql-data:
   app-data:
+  gateway-db-data:

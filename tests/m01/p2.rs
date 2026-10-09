@@ -120,7 +120,13 @@ async fn ring_based_release_honours_maintenance_window() {
     let v2 = format!("8.{}.0", rand_minor());
     let rel2 = app.state.m01.releases.create_release(&host, &v2, "Minor fix", "Non-disruptive.", false).await.unwrap();
     app.state.m01.releases.advance(&host, rel2.id).await.unwrap();
-    app.state.m01.releases.process_due().await.unwrap();
+    // The scheduler processes due rollouts in batches (200 per tick) across ALL tenants of the
+    // shared test database; drain it like consecutive ticks would.
+    for _ in 0..100 {
+        if app.state.m01.releases.process_due().await.unwrap() == 0 {
+            break;
+        }
+    }
     let after = app.get(&format!("/v1/tenants/{}", tid(&t)), &sa).await;
     assert_eq!(after.data()["platform_version"], v2.as_str(), "non-disruptive release applied immediately");
     // Advance through all rings; cannot go further.
@@ -156,7 +162,9 @@ async fn per_tenant_backup_restore_does_not_touch_other_tenants() {
     // R011
     let app = TestApp::new().await;
     let sa = app.sa_token().await;
-    let (a, ta_a) = app.active_tenant_with_admin(&sa, PLAN_STANDARD, json!({})).await;
+    // The DR report lists at most 500 tenants ordered by code; the shared test database holds many
+    // more, so this tenant gets a code that sorts first.
+    let (a, ta_a) = app.active_tenant_with_admin(&sa, PLAN_STANDARD, json!({ "tenant_code": format!("0-{}", unique_code("dr")) })).await;
     let (b, ta_b) = app.active_tenant_with_admin(&sa, PLAN_STANDARD, json!({})).await;
     let host = sa_actor();
     let backup = app.state.m01.backups.backup(&host, tenant_id(&a)).await.unwrap();

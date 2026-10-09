@@ -130,13 +130,26 @@ impl TenantDataStore for PgTenantStore {
         ));
 
         if self.strategy == StorageStrategy::DedicatedDatabase {
-            let mut conn = self.pool.acquire().await?;
-            let others: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pg_database d WHERE d.datname LIKE 'tn\\_%' AND d.datname <> current_database()
-                   AND has_database_privilege(d.datname, 'CONNECT')",
-            )
-            .fetch_one(&mut *conn)
-            .await?;
+            // A database that another provisioning is creating right now is connectable by PUBLIC
+            // between its CREATE DATABASE and REVOKE (Postgres default, milliseconds). Re-check a
+            // few times so that transient window does not fail this tenant's probe; a real leak
+            // persists and still fails.
+            let mut others: i64 = 0;
+            for attempt in 0..4 {
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                let mut conn = self.pool.acquire().await?;
+                others = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_database d WHERE d.datname LIKE 'tn\\_%' AND d.datname <> current_database()
+                       AND has_database_privilege(d.datname, 'CONNECT')",
+                )
+                .fetch_one(&mut *conn)
+                .await?;
+                if others == 0 {
+                    break;
+                }
+            }
             out.push(probe(
                 "dedicated_db.runtime_login_cannot_connect_elsewhere",
                 others == 0,

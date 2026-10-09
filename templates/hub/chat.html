@@ -1,0 +1,22 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<section class="card narrow hub-chat" id="chat" data-widget="{{ widget_key }}">
+  <h1 class="h2">Chat with us</h1>
+  <p class="help">{{ label }} · <span id="conn" class="badge badge-muted" role="status" aria-live="polite">not connected</span></p>
+  <form id="start" class="form">
+    <label for="name">Your name</label>
+    <input id="name" maxlength="80" autocomplete="name" placeholder="e.g. Aisyah">
+    <button class="btn btn-primary" type="submit">Start chat</button>
+  </form>
+  <ol id="messages" class="hub-messages" aria-live="polite" hidden></ol>
+  <form id="send" class="hub-reply" hidden>
+    <label for="text" class="sr-only">Message</label>
+    <textarea id="text" rows="2" maxlength="4096" placeholder="Type a message…" required></textarea>
+    <button class="btn btn-primary" type="submit">Send</button>
+  </form>
+  <p id="error" class="field-error" role="alert"></p>
+  <p class="help small">Demo web-chat channel of the hub. Your session is remembered in this browser for 24 hours. <button id="reset" class="btn btn-small" type="button" hidden>Start a new chat</button></p>
+</section>
+<noscript><p class="banner banner-warn">This chat needs JavaScript.</p></noscript>
+<script src="/static/js/hub-chat.js" defer></script>
+{% endblock %}

@@ -3,6 +3,8 @@
 //! unique codes, so tests run in parallel without resetting the databases.
 #![allow(dead_code)]
 
+pub mod hub;
+
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -56,6 +58,11 @@ pub fn unique_code(prefix: &str) -> String {
 
 impl TestApp {
     pub async fn new() -> Self {
+        Self::with_config(|_| {}).await
+    }
+
+    /// Like `new`, with a hook to adjust the configuration before the state is built.
+    pub async fn with_config(adjust: impl FnOnce(&mut AppConfig)) -> Self {
         let _ = dotenvy::dotenv();
         let mut cfg = AppConfig::from_env().expect("test configuration (copy .env.example to .env and start the Docker databases)");
         cfg.app_env = AppEnv::Test;
@@ -66,9 +73,11 @@ impl TestApp {
         cfg.retention_hours = 1;
         cfg.auto_purge = true;
         cfg.data_dir = std::env::temp_dir().join("omni-m01-tests");
+        cfg.hub_demo_seed = false;
         if std::path::Path::new("config/tenant-db-targets.local.toml").exists() && std::env::var("TENANT_DB_TARGETS_FILE").is_err() {
             cfg.tenant_db_targets_file = "config/tenant-db-targets.local.toml".into();
         }
+        adjust(&mut cfg);
         let clock = Arc::new(ManualClock::new(Utc::now()));
         let state = build_state(cfg.clone(), clock.clone()).await.expect("build state (are the Docker databases up?)");
         let router = build_router(state.clone());

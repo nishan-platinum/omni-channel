@@ -1,0 +1,96 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<h1>Channel simulator <span class="tag">simulated</span></h1>
+<p class="help">Plays the customers' side. WhatsApp goes through <strong>{{ whatsapp_label }}</strong> using the real WhatsApp Cloud API integration; voice is a simulated SBC feed. Open the <a href="/agent" target="_blank" rel="noopener">agent desktop</a> in another browser (signed in as an agent) to watch messages arrive.</p>
+
+{% include "hub/_meta_status.html" %}
+
+<div class="grid2">
+  <section class="card">
+    <h2>WhatsApp: customer sends a message</h2>
+    <p class="help">Provider: <strong>{{ whatsapp_label }}</strong>{% if fake_whatsapp %} <span class="tag">fake-meta — not WhatsApp</span>{% else %} <span class="tag">real WhatsApp</span>{% endif %}</p>
+    {% if whatsapp.is_empty() %}<p class="empty">No WhatsApp number yet — {% if fake_whatsapp %}create the channels{% else %}connect your Meta phone number ID{% endif %} on the <a href="/hub/admin">hub page</a>.</p>
+    {% else if fake_whatsapp %}
+    <form method="post" action="/hub/simulator/whatsapp" class="form">
+      <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+      <label for="w-ep">To our WhatsApp number</label>
+      <select id="w-ep" name="endpoint">{% for e in whatsapp %}<option value="{{ e.id }}">{{ e.label }} → {{ e.default_skill }}</option>{% endfor %}</select>
+      <div class="two-col">
+        <div><label for="w-from">Customer number</label><input id="w-from" name="from" value="60123456789" inputmode="numeric" required></div>
+        <div><label for="w-name">Customer name</label><input id="w-name" name="name" value="Aisyah"></div>
+      </div>
+      <label for="w-text">Message</label>
+      <textarea id="w-text" name="text" rows="3" maxlength="4096" required>Hi, my fibre connection is down since this morning.</textarea>
+      <button class="btn btn-primary" type="submit">Send WhatsApp message</button>
+    </form>
+    <p class="help small">fake-meta sends Meta's signed webhook to the hub over HTTP. Agent replies go to fake-meta's copy of the Graph API, which answers with <em>sent → delivered → read</em> webhooks. In a reply, <code>[fail]</code> → permanent error 131026, <code>[retry]</code> → transient error 131000 (retry ladder). Replies to a number that never wrote first are refused with 131047 (24-hour window), like real WhatsApp.</p>
+    {% else %}
+    <p>Real WhatsApp is connected. From a phone that is on your Meta test-recipient list, send a WhatsApp message to <strong>{{ display_number }}</strong>; it appears on the agent desktop. Agent replies arrive on that phone.</p>
+    <p class="help small">Meta must reach <code>{{ webhook_url }}</code> over public HTTPS (e.g. an ngrok/cloudflared tunnel to this server); set that URL and your <code>WHATSAPP_VERIFY_TOKEN</code> in Meta → WhatsApp → Configuration → Webhook, and subscribe to <em>messages</em>.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Voice: SBC call events</h2>
+    {% if voice.is_empty() %}<p class="empty">No voice DID yet — create the simulated channels on the <a href="/hub/admin">hub page</a>.</p>{% else %}
+    <form method="post" action="/hub/simulator/sip" class="form">
+      <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+      <label for="s-ep">Dialled number (our DID)</label>
+      <select id="s-ep" name="endpoint">{% for e in voice %}<option value="{{ e.id }}">{{ e.label }} → {{ e.default_skill }}</option>{% endfor %}</select>
+      <div class="two-col">
+        <div><label for="s-from">Caller number (ANI)</label><input id="s-from" name="from" value="+60198765432" required></div>
+        <div><label for="s-call">Call id</label><input id="s-call" name="call_id" value="{{ call_id }}" required></div>
+      </div>
+      <label for="s-ev">Event</label>
+      <select id="s-ev" name="event">{% for ev in events %}<option value="{{ ev }}">{{ ev }}</option>{% endfor %}</select>
+      <button class="btn btn-primary" type="submit">Send call event</button>
+    </form>
+    <p class="help small">Send <em>ringing</em>, then <em>answered</em>, then <em>ended</em> with the same call id. Each event becomes an ordered entry in the caller's voice conversation.</p>
+    {% endif %}
+  </section>
+</div>
+
+{% if fake_whatsapp && !whatsapp.is_empty() %}
+<section class="card" id="load">
+  <h2>WhatsApp bulk load (fake-meta)</h2>
+  <p class="help">Many fake customers write to the chosen number within a short time; fake-meta delivers each message as a signed webhook and measures how fast the hub acknowledges it. Use a number routed to a skill your load-test agents have (the <code>hub_load whatsapp</code> tool creates such agents and replies automatically, which also measures the full round trip).</p>
+  <form method="post" action="/hub/simulator/whatsapp/load" class="form inline-form">
+    <input type="hidden" name="_csrf" value="{{ page.csrf }}">
+    <label for="l-ep">Number</label>
+    <select id="l-ep" name="endpoint">{% for e in whatsapp %}<option value="{{ e.id }}">{{ e.label }} → {{ e.default_skill }}</option>{% endfor %}</select>
+    <label for="l-c">Customers</label><input id="l-c" name="customers" value="200" class="num" inputmode="numeric">
+    <label for="l-m">Messages each</label><input id="l-m" name="messages" value="5" class="num" inputmode="numeric">
+    <label for="l-r">Messages / second</label><input id="l-r" name="rate" value="200" class="num" inputmode="numeric">
+    <button class="btn btn-primary" type="submit">Start load run</button>
+  </form>
+  <div hx-get="/hub/simulator/whatsapp/live" hx-trigger="load, every 2s" hx-swap="innerHTML"><p class="help">Loading statistics…</p></div>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Web chat (customer side)</h2>
+  {% if webchat.is_empty() %}<p class="empty">No chat widget yet.</p>{% else %}
+  <p>{% for e in webchat %}<a class="btn" href="/chat/{{ e.address }}" target="_blank" rel="noopener">Open customer chat ({{ e.default_skill }}) ↗</a> {% endfor %}</p>
+  <p class="help small">Open it in a private window to act as a separate customer.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Calling the webhooks from the command line</h2>
+  <p class="help">The simulated providers sign the raw body with HMAC-SHA256 using the secrets from <code>.env</code> (<code>HUB_SIM_WHATSAPP_APP_SECRET</code>, <code>HUB_SIM_SIP_SECRET</code>). For example:</p>
+  <pre class="code">BODY='{"call_id":"c-42","event":"ringing","from":"+60111","to":"{% if let Some(v) = voice.first() %}{{ v.address }}{% else %}+6032000xxxx{% endif %}"}'
+SIG="sha256=$(printf %s "$BODY" | openssl dgst -sha256 -hmac "$HUB_SIM_SIP_SECRET" | sed 's/^.* //')"
+curl -s -X POST {{ base_url }}/v1/hub/channels/sip/events -H "X-Sim-Signature: $SIG" -H 'content-type: application/json' -d "$BODY"</pre>
+</section>
+
+<section class="card">
+  <h2>Simulated provider log</h2>
+  {% if log.is_empty() %}<p class="empty">Nothing yet.</p>{% else %}
+  <div class="table-wrap"><table class="compact">
+    <thead><tr><th>Time (UTC)</th><th>Channel</th><th>Direction</th><th>What happened</th></tr></thead>
+    <tbody>
+    {% for l in log %}<tr><td class="small">{{ l.created_at.format("%H:%M:%S") }}</td><td>{{ l.channel }}</td><td>{{ l.direction }}</td><td>{{ l.summary }}</td></tr>{% endfor %}
+    </tbody>
+  </table></div>{% endif %}
+</section>
+{% endblock %}
