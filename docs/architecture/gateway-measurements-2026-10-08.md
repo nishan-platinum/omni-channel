@@ -12,27 +12,40 @@ kernel's pressure-stall counters show I/O stalls. The spec's environment (2 × 4
 a separate 2 vCPU / 4 GB DB box, separate load boxes) would differ, mostly in the database tail.
 Results here are indicative, not official.
 
-## Eliminators (T1–T10) — final runs (median of 3 where the spec requires 3 runs)
+## Eliminators (T1–T10) — after the review fixes (runs in `eval-results/v2/`, median of 3)
 
 1× = 50,000 idle sessions per node + 500 msg/s, 200 agents, 2,000 open conversations.
 2× = 50,000 idle sessions per node + 1,000 msg/s, 200 agents, 4,000 open conversations.
 
-| ID | Threshold | Result here | Verdict | Runs |
+| ID | Threshold | Result | Verdict | Runs (`v2/`) |
 |---|---|---|---|---|
-| T1 | ≥ 100,000 idle sessions per node | 100,000 on one node (4 CPUs), 0 failed, 0 dropped; pong p50 0.13 ms, p99 ≈ 15 ms | **met** | `094427-e1` |
-| T2 | ≤ 40 KB per idle session at 100k | 16.4 KB (container memory 9.6 → 1,609 MiB, incl. kernel socket memory) | **met** | `094427-e1` |
-| T3 | p99 inbound→agent ≤ 250 ms at 1× | p99 12.4 / 101.5 / 13.6 ms → **median 13.6 ms** (p50 3.1 ms); 0 errors, 0 lost | **met** | `112039`, `112347`, `112654-e2` |
-| T4 | p99 ≤ 1,000 ms at 2× | p99 14.9 / 15.3 / 16.9 ms → **median 15.3 ms** | **met** | `113001`, `113312`, `113625-e2` |
-| T5 | error rate ≤ 0.1 % at 2× | **0 %** in all three runs (0 failed, 0 retried of 120,000 each) | **met** | same |
-| T6 | 0 acknowledged lost on worker kill | 0 lost of 109,994 acknowledged | **met** | `093431-e5` |
-| T7 | 0 acknowledged lost on node kill | 0 lost of 131,995 acknowledged, 0 seq gaps | **met** | `093020-e6` |
-| T8 | sessions re-routed within 30 s of node kill, 100 % | 100 of 100 agent sessions back within 30 s (median 0.44 s, max 3.5 s) | **met** | `093020-e6` |
-| T9 | ≥ 99 % of sessions survive a rolling deploy without reconnecting | **0 of 20,000 (0 %)** — all reconnected and resumed, 0 failed | **not met** (drain + resume by design, ADR-0014) | `113936-e7` |
-| T10 | C30–C33 pass under load | C30–C33 passed 3 runs in a row while the cluster carried 1× load (75,000 msgs, 0 lost) | **met** | `111629-t10` |
+| T1 | ≥ 100,000 idle sessions per node | 100,000 in each of 3 runs (4 CPUs), 0 failed, 0 dropped; pong p99 ≈ 1.15 s / 1.4 ms / 1.3 ms → median 1.4 ms | **met** | `122555`, `130049`, `130434-e1` |
+| T2 | ≤ 40 KB per idle session at 100k | 16.4 KB (all 3 runs) | **met** | same |
+| T3 | p99 inbound→agent ≤ 250 ms at 1× | p99 12.7 / 11.9 / 12.3 ms → **median 12.3 ms** (p50 3.0 ms); 0 errors, 0 lost | **met** | `122853`, `123201`, `123508-e2` |
+| T4 | p99 ≤ 1,000 ms at 2× | p99 20.4 / 15.1 / 14.0 ms → **median 15.1 ms** | **met** | `123815`, `124123`, `124435-e2` |
+| T5 | error rate ≤ 0.1 % at 2× | **0 %** (0 of 360,000) | **met** | same |
+| T6 | 0 acknowledged lost on worker kill | 0 of 109,999; 100/100 agent sessions back (max 3.2 s) | **met** | `e5` |
+| T7 | 0 acknowledged lost on node kill | 0 of 131,991; 0 seq gaps | **met** | `125112-e6` |
+| T8 | re-routed within 30 s, 100 % | 100 of 100 within 30 s (median 0.46 s, max 3.5 s); gw2 serving 1.6 s after restart | **met** | `125112-e6` |
+| T9 | ≥ 99 % survive rolling deploy without reconnecting | **0 of 20,000 (0 %)**; all resumed, 0 failed | **not met** (ADR-0014) | `125518-e7` |
+| T10 | C30–C33 under load | 3/3 runs passed during 1× load (75,000 msgs, 0 lost) | **met** | `125731-t10` |
 
-Earlier single runs of T3 (596 ms and 14.4 s p99) were taken while the laptop was busier and before
-the HAProxy check change; they are kept in `superseded/` and show how sensitive the tail is to this
-machine's disk (see Environment).
+The first E1 run's pong tail (≈ 1.15 s) did not repeat in the next two runs (1.4 / 1.3 ms); it is
+machine noise of the kind described under Environment. Pre-fix runs are in `eval-results/` (top level).
+
+## Review (spec section 8 checklist) — self-review, not independent
+
+| Severity | Finding | Status |
+|---|---|---|
+| Medium | A failed DB write at agent disconnect left a "connected" row on a live node: the agent stayed available and its conversations never re-routed | **Fixed**: nodes track live agent connections and remove other rows of their own every 10 s (`reconcile_node`); the disconnect write is retried (store test) |
+| Medium | An event lost by the stream (Redis outage, failed publish) delayed delivery until the conversation's next message or a client resume | **Fixed**: re-subscribing nodes and failed publishes trigger a `Resync`; sessions re-read subscriptions and catch up only conversations that moved (spread over 3 s). Verified: Redis restarted mid-run under 1× load — 30,000 acknowledged, 0 lost, 0 undelivered |
+| Medium | Every customer `hello` cost one DB query: a reconnect storm became a DB burst | **Fixed**: lookups batched (≤ 500 customers per query, 3 ms linger, bounded queue) — `application/loader.rs` (store test) |
+| Low | Redis client's receive buffer is unbounded (drained without blocking) | Open |
+| Low | Development default token in Compose / scripts (the binary has no default) | Open |
+| Low | WebSocket token in the query string (contract) can reach proxy logs if access logging is enabled | Open |
+
+Found on the way (CRM, not the gateway): the M10 hub's `/ready` stayed "bus not OK" after a Redis
+restart until the next publish (cached broken connection). Fixed: a failed health ping resets it.
 
 ## Scores (reported, not thresholds)
 

@@ -639,6 +639,26 @@ impl Store {
         self.mark_disconnected(&agents, None).await
     }
 
+    /// Removes this node's connection rows that no longer belong to a live socket (a disconnect
+    /// whose database write failed). Rows younger than 5 s are left alone: their socket may be
+    /// registering right now. Returns agents whose presence changed.
+    pub async fn reconcile_node(&self, node: &str, live: &[String]) -> GwResult<Vec<String>> {
+        let stale: Vec<String> = sqlx::query_scalar(
+            "DELETE FROM gw.agent_sessions
+              WHERE node_id = $1 AND connected_at < now() - interval '5 seconds' AND NOT (connection_id = ANY($2))
+             RETURNING agent_id",
+        )
+        .bind(node)
+        .bind(live)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?;
+        if !stale.is_empty() {
+            tracing::warn!(node, rows = stale.len(), "removed stale agent connection rows");
+        }
+        self.mark_disconnected(&stale, None).await
+    }
+
     /// Agents with no live connection left become unavailable (status kept for a resume) with the
     /// re-route clock started at `since` (node death: its last heartbeat). Returns those changed.
     async fn mark_disconnected(&self, agents: &[String], since: Option<DateTime<Utc>>) -> GwResult<Vec<String>> {
@@ -759,6 +779,16 @@ impl Store {
                 .await
                 .map_err(db)?;
         rows.iter().map(message_from_row).collect()
+    }
+
+    /// Open conversations of many customers in one query (batched session lookups):
+    /// `(customer, conversation_id, last_seq)`.
+    pub async fn customers_conversations(&self, customers: &[String]) -> GwResult<Vec<(String, String, i64)>> {
+        sqlx::query_as("SELECT customer, id, last_seq FROM gw.conversations WHERE customer = ANY($1) AND status <> 'closed'")
+            .bind(customers)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db)
     }
 
     /// Open conversations a customer session is subscribed to, with their current last `seq`.

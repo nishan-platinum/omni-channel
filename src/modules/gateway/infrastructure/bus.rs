@@ -3,6 +3,7 @@
 //! the store is: a session that misses an event (reconnect, Redis blip) gets it from the store
 //! through `resume` or the per-conversation gap fill.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -48,11 +49,13 @@ impl EventBus for LocalBus {
 pub struct RedisBus {
     client: redis::Client,
     conn: Mutex<Option<redis::aio::MultiplexedConnection>>,
+    /// A resync broadcast is being retried (an event could not be published).
+    resync_pending: Arc<AtomicBool>,
 }
 
 impl RedisBus {
     pub fn new(url: &str) -> anyhow::Result<Arc<Self>> {
-        Ok(Arc::new(Self { client: redis::Client::open(url)?, conn: Mutex::new(None) }))
+        Ok(Arc::new(Self { client: redis::Client::open(url)?, conn: Mutex::new(None), resync_pending: Arc::new(AtomicBool::new(false)) }))
     }
 
     async fn connection(&self) -> redis::RedisResult<redis::aio::MultiplexedConnection> {
@@ -91,8 +94,25 @@ impl EventBus for RedisBus {
             *self.conn.lock().await = None;
             tokio::time::sleep(Duration::from_millis(50 * (attempt + 1))).await;
         }
-        // Durable already; subscribers catch up via resume / gap fill.
-        tracing::error!("event not published after retries; sessions will catch up from the store");
+        // Durable already. Every node's sessions must catch up from the store: broadcast a resync
+        // as soon as the stream is reachable again (one retry loop at a time).
+        tracing::error!("event not published after retries; scheduling a cluster-wide resync");
+        if !self.resync_pending.swap(true, Ordering::AcqRel) {
+            let (client, pending) = (self.client.clone(), self.resync_pending.clone());
+            tokio::spawn(async move {
+                let payload = serde_json::to_vec(&GwEvent::Resync).unwrap_or_default();
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    if let Ok(mut c) = client.get_multiplexed_async_connection().await {
+                        if redis::cmd("PUBLISH").arg(CHANNEL).arg(&payload).query_async::<i64>(&mut c).await.is_ok() {
+                            pending.store(false, Ordering::Release);
+                            tracing::info!("resync broadcast sent");
+                            return;
+                        }
+                    }
+                }
+            });
+        }
     }
 
     fn start(&self, sink: EventSink, subscribed: oneshot::Sender<()>) {
@@ -105,8 +125,12 @@ impl EventBus for RedisBus {
                     Ok(mut ps) => match ps.subscribe(CHANNEL).await {
                         Ok(()) => {
                             tracing::info!(channel = CHANNEL, "event stream subscribed");
-                            if let Some(tx) = subscribed.take() {
-                                let _ = tx.send(());
+                            match subscribed.take() {
+                                Some(tx) => {
+                                    let _ = tx.send(());
+                                }
+                                // Re-subscribed after a break: events in between were missed here.
+                                None => sink(GwEvent::Resync),
                             }
                             backoff = Duration::from_millis(200);
                             let mut stream = ps.into_on_message();
@@ -129,9 +153,13 @@ impl EventBus for RedisBus {
     }
 
     async fn healthy(&self) -> bool {
-        match self.connection().await {
+        let ok = match self.connection().await {
             Ok(mut c) => redis::cmd("PING").query_async::<String>(&mut c).await.is_ok(),
             Err(_) => false,
+        };
+        if !ok {
+            *self.conn.lock().await = None;
         }
+        ok
     }
 }

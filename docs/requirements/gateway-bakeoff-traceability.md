@@ -67,8 +67,8 @@ The suite passed 3 runs in a row (33/33 each) against the two-node deployment.
 |---|---|
 | T1 ≥ 100k idle sessions / node | Met (100k, 4 CPUs) |
 | T2 ≤ 40 KB / session | Met (16.4 KB) |
-| T3 p99 ≤ 250 ms at 1× | Met (median 13.6 ms of 3 runs, with 50k idle/node) |
-| T4 p99 ≤ 1 s at 2× | Met (median 15.3 ms) |
+| T3 p99 ≤ 250 ms at 1× | Met (median 12.3 ms of 3 runs, with 50k idle/node) |
+| T4 p99 ≤ 1 s at 2× | Met (median 15.1 ms) |
 | T5 errors ≤ 0.1 % at 2× | Met (0 %) |
 | T6 0 lost on worker kill | Met |
 | T7 0 lost on node kill | Met |

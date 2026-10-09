@@ -250,10 +250,20 @@ impl Session {
     }
 
     async fn subscriptions(&mut self) -> Result<Vec<(String, i64)>, GwError> {
-        match self.role {
-            ActorKind::Agent => self.gw.store.agent_conversations(&self.id).await,
-            _ => self.gw.store.customer_conversations(&self.id).await,
+        self.gw.subscriptions(self.role, &self.id).await
+    }
+
+    /// After a possible event-stream gap: re-read subscriptions and fetch only conversations whose
+    /// stored `seq` is ahead of what this session delivered (new conversations from `seq` 1).
+    async fn resync(&mut self) -> Result<(), GwError> {
+        let subs = self.subscriptions().await?;
+        for (conv, last) in subs {
+            let cursor = *self.cursors.entry(conv.clone()).or_insert(0);
+            if last > cursor {
+                self.catch_up(&conv, None).await?;
+            }
         }
+        Ok(())
     }
 
     async fn send(&mut self, v: Value) -> Result<(), ()> {
@@ -323,14 +333,17 @@ impl Session {
         if *reg.shutdown.borrow() {
             leave_at = Some(Instant::now());
         }
+        // Resync requests are spread over 3 s so a cluster-wide resync is not a thundering herd.
+        let mut resync_at: Option<Instant> = None;
         loop {
-            let deadline = leave_at;
-            let leave = async move {
-                match deadline {
+            let at = |t: Option<Instant>| async move {
+                match t {
                     Some(t) => tokio::time::sleep_until(t).await,
                     None => std::future::pending().await,
                 }
             };
+            let leave = at(leave_at);
+            let resync = at(resync_at);
             tokio::select! {
                 frame = self.socket.recv() => {
                     let text = match frame {
@@ -351,6 +364,12 @@ impl Session {
                         GwEvent::Presence { agent_id, available } => {
                             self.send(json!({ "type": "presence", "agent_id": agent_id, "available": available })).await
                         }
+                        GwEvent::Resync => {
+                            if resync_at.is_none() {
+                                resync_at = Some(Instant::now() + Duration::from_millis(rand::thread_rng().gen_range(0..3000)));
+                            }
+                            Ok(())
+                        }
                         GwEvent::Config { .. } => Ok(()),
                     };
                     if r.is_err() {
@@ -361,6 +380,12 @@ impl Session {
                     if changed.is_err() || *reg.shutdown.borrow() {
                         let spread = rand::thread_rng().gen_range(0..2000);
                         leave_at = Some(Instant::now() + Duration::from_millis(spread));
+                    }
+                }
+                _ = resync => {
+                    resync_at = None;
+                    if self.resync().await.is_err() {
+                        return Flow::Close(1011, "resync failed: reconnect and resume");
                     }
                 }
                 _ = leave => {

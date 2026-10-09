@@ -66,7 +66,12 @@ impl RedisBus {
 
     pub async fn ping(&self) -> redis::RedisResult<()> {
         let mut c = self.connection().await?;
-        redis::cmd("PING").query_async::<String>(&mut c).await.map(|_| ())
+        let r = redis::cmd("PING").query_async::<String>(&mut c).await.map(|_| ());
+        if r.is_err() {
+            // A connection broken by a Redis restart must not keep /ready failing until the next publish.
+            self.reset().await;
+        }
+        r
     }
 }
 

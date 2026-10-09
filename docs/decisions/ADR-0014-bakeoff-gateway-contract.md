@@ -45,7 +45,14 @@ bake-off contract **to this repository** rather than to a fresh repo.
   as the fixture (lets the suite change routing rules without file access); it lasts until the next
   file reload — a starting node reads the fixture source, as the spec requires.
 * **Sessions.** Session ids are HMAC-signed `(role, id)` tokens: any node can resume them without
-  shared session storage.
+  shared session storage. Customer subscription lookups are batched (one query per ≤ 500
+  customers) so reconnect storms do not become database bursts.
+* **Recovery of the stream and presence.** A node that re-subscribes to the stream, or fails to
+  publish an event, triggers `Resync`: sessions re-read their subscriptions and catch up from the
+  store. Each node removes its own agent-connection rows that no longer match a live socket
+  (a lost disconnect write would otherwise keep a ghost agent "available").
+* **Routing worker.** Ingest never waits for routing: a per-node, per-skill worker drains the queue
+  in short set-based chunks (one transaction and one publish per ≤ 100 conversations).
 
 ## Interpretations where the spec is silent (documented in docs/architecture/gateway-protocol.md)
 * WebSocket frames are JSON objects with a `type`; `message` frames carry the canonical message

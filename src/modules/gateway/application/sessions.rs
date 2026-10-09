@@ -128,6 +128,15 @@ impl SessionRegistry {
                     }
                 }
             }
+            GwEvent::Resync => {
+                for map in [&self.customers, &self.agents] {
+                    if let Ok(mut m) = map.lock() {
+                        for v in m.values_mut() {
+                            self.push_to(v, &ev);
+                        }
+                    }
+                }
+            }
             GwEvent::Config { .. } => {}
         }
     }
@@ -178,6 +187,8 @@ mod tests {
         assert!(other.rx.try_recv().is_err() && b.rx.try_recv().is_err());
         r.dispatch(GwEvent::Presence { agent_id: "a1".into(), available: true });
         assert!(a.rx.try_recv().is_ok() && b.rx.try_recv().is_ok() && c.rx.try_recv().is_err());
+        r.dispatch(GwEvent::Resync);
+        assert!(c.rx.try_recv().is_ok() && other.rx.try_recv().is_ok() && a.rx.try_recv().is_ok() && b.rx.try_recv().is_ok());
         r.unregister(&c);
         assert_eq!(r.counts(), (1, 2));
     }

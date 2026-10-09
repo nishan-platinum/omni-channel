@@ -195,3 +195,47 @@ async fn dead_node_agents_lose_their_conversations_after_the_grace_period() {
     assert_eq!(c2.assigned_agent.as_deref(), Some(spare.as_str()));
     assert_eq!(msgs.iter().map(|m| m.seq).collect::<Vec<_>>(), (1..=msgs.len() as i64).collect::<Vec<_>>());
 }
+
+#[tokio::test]
+async fn stale_connection_rows_of_a_live_node_are_reconciled() {
+    let _turn = ROUTING.lock().await;
+    let s = store().await;
+    let skill = uid("sk");
+    let (ghost, real) = (uid("agent"), uid("agent"));
+    let node = uid("node");
+    online(&s, &node, &skill, &[&ghost, &real]).await;
+    s.set_status(&ghost, true).await.unwrap();
+    // Both rows exist; only `real`'s connection is still live on the node. The ghost's disconnect
+    // write was lost, so its row would keep it "connected" for as long as the node lives.
+    let live: Vec<String> = sqlx::query_scalar("SELECT connection_id FROM gw.agent_sessions WHERE agent_id = $1")
+        .bind(&real)
+        .fetch_all(s.pool())
+        .await
+        .unwrap();
+    // Fresh rows are protected (their socket may be registering right now).
+    assert!(s.reconcile_node(&node, &live).await.unwrap().is_empty());
+    sqlx::query("UPDATE gw.agent_sessions SET connected_at = now() - interval '10 seconds' WHERE node_id = $1")
+        .bind(&node)
+        .execute(s.pool())
+        .await
+        .unwrap();
+    assert_eq!(s.reconcile_node(&node, &live).await.unwrap(), vec![ghost.clone()]);
+    let view = s.presence(&[]).await.unwrap();
+    let st = |id: &str| view.agents.iter().find(|a| a.id == id).map(|a| a.status).unwrap();
+    assert_eq!((st(&ghost), st(&real)), ("offline", "unavailable"));
+}
+
+#[tokio::test]
+async fn subscriptions_of_many_customers_in_one_query() {
+    let s = store().await;
+    let f = fixture(&uid("sk"), &[]);
+    let (a, b, none) = (uid("cust"), uid("cust"), uid("cust"));
+    for c in [&a, &a, &b] {
+        s.append_customer(CustomerTarget { channel: Channel::Whatsapp, customer: c, conversation_id: None, fixture: &f }, &text(c, None))
+            .await
+            .unwrap();
+    }
+    let rows = s.customers_conversations(&[a.clone(), b.clone(), none.clone()]).await.unwrap();
+    let seq_of = |c: &str| rows.iter().find(|r| r.0 == c).map(|r| r.2);
+    assert_eq!((seq_of(&a), seq_of(&b), seq_of(&none)), (Some(2), Some(1), None));
+}

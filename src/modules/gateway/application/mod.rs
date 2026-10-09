@@ -2,6 +2,7 @@
 //! routing → session fan-out. Every appended message is published once to the event stream; each
 //! node delivers it to the sessions it holds (customer of the conversation, assigned agent).
 
+pub mod loader;
 pub mod metrics;
 pub mod router;
 pub mod sessions;
@@ -22,6 +23,7 @@ use sha2::Sha256;
 use super::domain::{ulid, Actor, ActorKind, CanonicalMessage, Channel, Direction, Fixture, Invalid, MessageKind, NewMessage};
 use super::infrastructure::fixture::FixtureSource;
 use super::infrastructure::store::{CustomerTarget, Store};
+use loader::SubscriptionLoader;
 use metrics::Metrics;
 use router::Router;
 use sessions::SessionRegistry;
@@ -114,9 +116,21 @@ pub struct ReapOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum GwEvent {
-    Message { customer: String, agent: Option<String>, message: CanonicalMessage },
-    Presence { agent_id: String, available: bool },
-    Config { version: i64 },
+    Message {
+        customer: String,
+        agent: Option<String>,
+        message: CanonicalMessage,
+    },
+    Presence {
+        agent_id: String,
+        available: bool,
+    },
+    Config {
+        version: i64,
+    },
+    /// Events may have been missed (event stream outage): every session re-reads its
+    /// subscriptions and catches up from the store.
+    Resync,
 }
 
 pub type EventSink = Arc<dyn Fn(GwEvent) + Send + Sync>;
@@ -145,6 +159,10 @@ pub struct Gateway {
     pub sessions: Arc<SessionRegistry>,
     pub metrics: Arc<Metrics>,
     pub router: Router,
+    pub loader: SubscriptionLoader,
+    /// Agent connections open on this node (connection ids): rows in `gw.agent_sessions` for this
+    /// node that are not here are stale and get removed (`reconcile_node`).
+    live_agent_connections: std::sync::Mutex<std::collections::HashSet<String>>,
     pub node_id: String,
     fixture: RwLock<(Arc<Fixture>, i64)>,
     fixture_source: FixtureSource,
@@ -159,6 +177,8 @@ impl Gateway {
     pub fn new(store: Store, bus: Arc<dyn EventBus>, node_id: String, fixture_source: FixtureSource, session_key: Vec<u8>) -> Arc<Self> {
         Arc::new(Self {
             router: Router::new(store.clone(), bus.clone()),
+            loader: SubscriptionLoader::spawn(store.clone()),
+            live_agent_connections: std::sync::Mutex::new(std::collections::HashSet::new()),
             store,
             bus,
             sessions: Arc::new(SessionRegistry::default()),
@@ -220,6 +240,9 @@ impl Gateway {
             });
             return;
         }
+        if matches!(ev, GwEvent::Resync) {
+            tracing::info!("event stream resync: sessions catch up from the store");
+        }
         self.sessions.dispatch(ev);
     }
 
@@ -228,11 +251,16 @@ impl Gateway {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut n: u64 = 0;
             loop {
                 tick.tick().await;
+                n += 1;
                 let Some(gw) = me.upgrade() else { return };
                 if let Err(e) = gw.store.heartbeat(&gw.node_id).await {
                     tracing::warn!(error = %e, "node heartbeat failed");
+                }
+                if n % 10 == 0 {
+                    gw.reconcile_connections().await;
                 }
                 if let Err(e) = gw.tick().await {
                     tracing::warn!(error = %e, "reaper pass failed");
@@ -375,7 +403,15 @@ impl Gateway {
         session_id: &str,
         resume: bool,
     ) -> GwResult<()> {
-        let available = self.store.agent_connected(agent, hello_skills, connection_id, session_id, &self.node_id, resume).await?;
+        // Listed as live before the row exists, so reconciliation never removes a new connection.
+        self.live_connections().insert(connection_id.to_string());
+        let available = match self.store.agent_connected(agent, hello_skills, connection_id, session_id, &self.node_id, resume).await {
+            Ok(a) => a,
+            Err(e) => {
+                self.live_connections().remove(connection_id);
+                return Err(e);
+            }
+        };
         // A resumed session may come back available: announce it and serve its queues.
         if resume && available {
             self.bus.publish(&GwEvent::Presence { agent_id: agent.to_string(), available: true }).await;
@@ -385,12 +421,46 @@ impl Gateway {
     }
 
     pub async fn agent_disconnected(&self, agent: &str, connection_id: &str) {
-        match self.store.agent_disconnected(agent, connection_id).await {
-            Ok(true) => self.bus.publish(&GwEvent::Presence { agent_id: agent.to_string(), available: false }).await,
-            Ok(false) => {}
-            // The node heartbeat stops covering this row once the node dies; a live node's stale
-            // row is cleaned up when the node restarts (node_started).
-            Err(e) => tracing::warn!(error = %e, agent, "could not record agent disconnect"),
+        for attempt in 0..3u64 {
+            match self.store.agent_disconnected(agent, connection_id).await {
+                Ok(changed) => {
+                    if changed {
+                        self.bus.publish(&GwEvent::Presence { agent_id: agent.to_string(), available: false }).await;
+                    }
+                    break;
+                }
+                // Still failing: the row is no longer live, so `reconcile_connections` removes it.
+                Err(e) => {
+                    tracing::warn!(error = %e, agent, attempt, "could not record agent disconnect");
+                    tokio::time::sleep(Duration::from_millis(200 * (attempt + 1))).await;
+                }
+            }
+        }
+        self.live_connections().remove(connection_id);
+    }
+
+    fn live_connections(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<String>> {
+        self.live_agent_connections.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Removes this node's agent connection rows that have no live socket behind them.
+    pub async fn reconcile_connections(&self) {
+        let live: Vec<String> = self.live_connections().iter().cloned().collect();
+        match self.store.reconcile_node(&self.node_id, &live).await {
+            Ok(changed) => {
+                for agent in changed {
+                    self.bus.publish(&GwEvent::Presence { agent_id: agent, available: false }).await;
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "connection reconciliation failed"),
+        }
+    }
+
+    /// Conversations a session is subscribed to, with their last `seq` (customer lookups batched).
+    pub async fn subscriptions(&self, role: ActorKind, id: &str) -> GwResult<Vec<(String, i64)>> {
+        match role {
+            ActorKind::Agent => self.store.agent_conversations(id).await,
+            _ => self.loader.customer(id).await,
         }
     }
 
